@@ -6,9 +6,51 @@ from pathlib import Path
 import sys
 import threading
 import time
+from zipfile import BadZipFile, ZipFile
 from .package import inspect
 from .validation import validate
 from .hub import PACKAGE_SUFFIXES
+
+
+def _native_graph_package(path):
+    from .native_fxb import PRODUCER_MEMBER
+
+    try:
+        with ZipFile(path) as archive:
+            members = set(archive.namelist())
+            return PRODUCER_MEMBER in members and 'execution_plan.json' not in members
+    except (FileNotFoundError, BadZipFile):
+        return False
+
+
+def _run_native_graph_sample(package, output):
+    from safetensors.torch import load_file, save_file
+    from .checkpoint import SafeTensorWeights
+    from .execution_fxb import ExecutionFXB
+
+    sample = Path(package + '.sample.safetensors')
+    weights = Path(package + '.weights')
+    if not sample.is_file():
+        raise ValueError(f'Missing native graph sample: {sample}')
+    if output and Path(output).suffix != '.safetensors':
+        raise ValueError('Native graph tensor output requires a .safetensors destination')
+    with ExecutionFXB(package, weights=SafeTensorWeights(weights) if weights.exists() else None) as model:
+        entry = model.plan['entries']['forward']
+        tensors = load_file(str(sample))
+        if all(name in tensors for name in entry['inputs']):
+            inputs = tuple(tensors[name] for name in entry['inputs'])
+        elif len(entry['inputs']) == 1 and 'image0' in tensors:
+            inputs = (tensors['image0'],)
+        else:
+            raise ValueError(f'Sample needs tensors named {entry["inputs"]}')
+        results = dict(zip(entry['outputs'], model.predict(inputs), strict=True))
+    report = {'outputs': {name: {'shape': list(tensor.shape), 'dtype': str(tensor.dtype)}
+                          for name, tensor in results.items()}}
+    if output:
+        save_file({name: tensor.contiguous().clone() for name, tensor in results.items()}, output)
+        report['result_file'] = str(Path(output).resolve())
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _save_result(result, report_dir, output):
@@ -157,6 +199,9 @@ Run precompiled packages from a file or the model catalog.""")
     if args.action in ('run','chat','predict','serve','describe','sample','inspect','validate'):
         from .hub import resolve_package
         args.package=str(resolve_package(args.package))
+    if args.action == 'run' and args.sample and not args.input and not args.image:
+        if _native_graph_package(args.package):
+            return _run_native_graph_sample(args.package, args.output)
     sample_contract=None
     if args.action=='run' and args.image and args.input:
         raise ValueError('Use --image or --input, not both')

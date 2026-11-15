@@ -6,7 +6,7 @@ class PublicAPI(unittest.TestCase):
  def test_exports_share_the_artifact_engine_without_copying_implementation(self):
   for name in ('LLM','Model','YOLO','ImageGeneration','hug','as_torch','GraphFXB','SafeTensorWeights'):
    self.assertIs(getattr(fxbx,name),getattr(fxbex,name))
-  self.assertEqual(fxbx.__version__,'0.9.0')
+  self.assertEqual(fxbx.__version__,'0.9.1')
  def test_old_adapter_can_import_package_without_access_to_a_writer(self):
   from fxbex.package import PackageError, build
   with self.assertRaisesRegex(PackageError,'cannot create'):
