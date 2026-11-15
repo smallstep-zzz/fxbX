@@ -9,7 +9,6 @@ from contextlib import ExitStack
 import hashlib
 import json
 import os
-from contextlib import nullcontext
 from pathlib import Path
 import threading
 import time
@@ -298,6 +297,21 @@ class ExecutionFXB:
         self._requests=set();self.last_timing=None;self.max_request_states=max_request_states;self._default_ready=False
         from .memory import tensor_bytes
         self._state_bytes=sum(tensor_bytes(t) for t in self.plan['tensors'].values() if t['kind']=='state')
+        self._replay_steps = {}
+        specs = self.plan['tensors']
+        for entry, recipe in self.plan['entries'].items():
+            last = _last_uses(recipe)
+            retain = set(recipe['outputs']) | set(recipe['state_updates'].values())
+            steps = []
+            for index, step in enumerate(recipe['steps']):
+                release = tuple(dict.fromkeys(
+                    name for name in step['inputs'] + step['outputs']
+                    if specs[name]['kind'] in ('user_input', 'intermediate')
+                    and name not in retain and last.get(name, index) <= index
+                ))
+                steps.append((step['kernel'], tuple(step['inputs']),
+                              tuple((name, specs[name]) for name in step['outputs']), release))
+            self._replay_steps[entry] = steps
     def __enter__(self):
         with self._lock:
             if self.stack is not None:raise ExecutionPlanError('Session already open')
@@ -437,7 +451,6 @@ class ExecutionFXB:
             if state is not None:self._check_state(state)
             self.memory=self._admit_requests(len(self._requests),output_device,default_present=self._default_ready or state is None)
             recipe=self.plan['entries'][entry]
-            last=_last_uses(recipe);retain=set(recipe['outputs'])|set(recipe['state_updates'].values())
             if isinstance(inputs,dict):
                 if set(inputs)!=set(recipe['inputs']):raise ExecutionPlanError('Entry input names differ')
                 values=inputs
@@ -453,16 +466,20 @@ class ExecutionFXB:
                     if state is None and not self._default_ready:self._reset()
                     active=self.states if state is None else state._tensors
                     tensors={**self.resident,**active,**{k:self._upload(v,self.plan['tensors'][k]) for k,v in values.items()}}
-                    for index,step in enumerate(recipe['steps']):
-                        marker=nullcontext()
-                        if os.environ.get('FXBX_TRACE_STEPS')=='1':
-                            from furiosa.torch.profiler import RecordFunction
-                            marker=RecordFunction(f"execution_plan::{entry}::{index}::{step['kernel']}",propagate=True)
-                        with marker:result=self.programs[step['kernel']](*(tensors[n] for n in step['inputs']))
+                    trace_steps = os.environ.get('FXBX_TRACE_STEPS') == '1'
+                    if trace_steps:
+                        from furiosa.torch.profiler import RecordFunction
+                    for index, (kernel, input_names, outputs, release) in enumerate(self._replay_steps[entry]):
+                        args = tuple(tensors[name] for name in input_names)
+                        if trace_steps:
+                            with RecordFunction(f'execution_plan::{entry}::{index}::{kernel}', propagate=True):
+                                result = self.programs[kernel](*args)
+                        else:
+                            result = self.programs[kernel](*args)
+                        del args
                         if not isinstance(result,(tuple,list)):result=[result]
-                        if len(result)!=len(step['outputs']):raise ExecutionPlanError('Kernel output arity mismatch')
-                        for name,value in zip(step['outputs'],result):
-                            spec=self.plan['tensors'][name]
+                        if len(result)!=len(outputs):raise ExecutionPlanError('Kernel output arity mismatch')
+                        for (name, spec), value in zip(outputs, result):
                             if (not _tensor_matches(value,spec,self.torch)
                                     or value.device.type!='furiosa'):
                                 raise ExecutionPlanError(f"NPU output metadata mismatch: {name}; "
@@ -470,9 +487,8 @@ class ExecutionFXB:
                                                          f"dtype={value.dtype}, stride={value.stride()}, device={value.device}")
                             tensors[name]=value
                         del result,value
-                        for name in step['inputs']+step['outputs']:
-                            if (self.plan['tensors'][name]['kind'] in ('user_input','intermediate')
-                                    and name not in retain and last.get(name,index)<=index):tensors.pop(name,None)
+                        for name in release:
+                            tensors.pop(name, None)
                     persistent_outputs=set(self.resident)|set(active)|set(recipe['state_updates'].values())|_zero_input_outputs(recipe)
                     output=tuple(tensors[n].cpu() if output_device=='cpu' else
                                  tensors[n].clone() if n in persistent_outputs else tensors[n]
