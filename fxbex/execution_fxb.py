@@ -299,6 +299,8 @@ class ExecutionFXB:
         self._state_bytes=sum(tensor_bytes(t) for t in self.plan['tensors'].values() if t['kind']=='state')
         self._replay_steps = {}
         self._sequences = {}
+        self._merged_programs = {}
+        self.merged_status = {}
         specs = self.plan['tensors']
         for entry, recipe in self.plan['entries'].items():
             last = _last_uses(recipe)
@@ -409,24 +411,83 @@ class ExecutionFXB:
             def node(name):
                 if name not in nodes:nodes[name]=builder.const_tensor(folded[name] if name in folded else self.resident[name])
                 return nodes[name]
-            for step in recipe['steps']:
-                program=self.programs[step['kernel']]
-                if all(n in folded or n in self.resident for n in step['inputs']):
-                    result=program(*(folded[n] if n in folded else self.resident[n] for n in step['inputs']))
-                    result=result if isinstance(result,(tuple,list)) else [result]
-                    if len(result)!=len(step['outputs']):raise ExecutionPlanError('Kernel output arity mismatch')
-                    for name,value in zip(step['outputs'],result):
-                        if not _tensor_matches(value,specs[name],self.torch) or value.device.type!='furiosa':
-                            raise ExecutionPlanError('NPU output metadata mismatch: '+name)
-                        folded[name]=value
-                    continue
-                inner=program._inner
+            # Fold first: a merged group may read a folded tensor that sits inside its span.
+            folded_positions=set()
+            for position,step in enumerate(recipe['steps']):
+                if not all(n in folded or n in self.resident for n in step['inputs']):continue
+                result=self.programs[step['kernel']](*(folded[n] if n in folded else self.resident[n] for n in step['inputs']))
+                result=result if isinstance(result,(tuple,list)) else [result]
+                if len(result)!=len(step['outputs']):raise ExecutionPlanError('Kernel output arity mismatch')
+                for name,value in zip(step['outputs'],result):
+                    if not _tensor_matches(value,specs[name],self.torch) or value.device.type!='furiosa':
+                        raise ExecutionPlanError('NPU output metadata mismatch: '+name)
+                    folded[name]=value
+                folded_positions.add(position)
+            merged,covered,reason=self._merged_groups(entry,recipe)
+            launches=0
+            for position,step in enumerate(recipe['steps']):
+                if position in merged:
+                    group,program=merged[position];inner=program._inner
+                    launch=builder.runnable(inner.binary,inner.weight,inner.stacks,inner._flattened_params,
+                                            [node(n) for n in group['inputs']],inner)
+                    for index,name in enumerate(group['outputs']):nodes[name]=builder.getitem(launch,index)
+                    launches+=1;continue
+                if position in covered or position in folded_positions:continue
+                inner=self.programs[step['kernel']]._inner
                 launch=builder.runnable(inner.binary,inner.weight,inner.stacks,inner._flattened_params,
                                         [node(n) for n in step['inputs']],inner)
                 for index,name in enumerate(step['outputs']):nodes[name]=builder.getitem(launch,index)
+                launches+=1
             builder.output([node(n) for n in recipe['outputs']])
             self._sequences[entry]=(builder.build(),folded)
+            self.merged_status[entry]={'merged_runnables':reason,'groups':len(merged),'launches':launches,'folded':len(folded)}
         self._sync()
+    def _merged_groups(self,entry,recipe):
+        """Optional sidecar MODEL.fxbx.merged/: SDK-serialized Runnables, each covering consecutive plan steps.
+
+        These are not EDFs. They load only with the exact SDK versions that wrote them and the
+        same plan hash, and only when each group matches the plan's dataflow and tensor shapes.
+        Anything else keeps the per-step EDFs and records why.
+        """
+        import importlib.metadata as metadata
+        from .graph_fxb import _sha
+        root=Path(str(self.path)+'.merged')
+        if not (root/'manifest.json').is_file():return {},set(),'absent'
+        try:
+            manifest=json.loads((root/'manifest.json').read_text())
+            if manifest.get('schema')!='fxbx.merged-runnables.v1' or manifest.get('execution_plan_sha256')!=_sha(self.plan):
+                return {},set(),'plan hash differs'
+            if any(metadata.version(p)!=v for p,v in manifest['packages'].items()):return {},set(),'SDK version differs'
+            groups=manifest['entries'].get(entry) or []
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,metadata.PackageNotFoundError) as exc:
+            return {},set(),f'unreadable manifest: {exc}'
+        steps,specs=recipe['steps'],self.plan['tensors']
+        const,folded=set(self.resident),set()
+        for position,step in enumerate(steps):
+            if all(n in const for n in step['inputs']):const.update(step['outputs']);folded.add(position)
+        merged,covered=[],set()
+        for group in groups:
+            span=group.get('steps')
+            # Consecutive among live steps: load-time folded steps may sit between them.
+            if (not span or span[-1]>=len(steps) or any(p in covered for p in span)
+                    or span!=[p for p in range(span[0],span[-1]+1) if p not in folded]):
+                return {},set(),'group is not consecutive live steps'
+            produced,inputs=set(),[]
+            for p in span:
+                inputs+=[n for n in steps[p]['inputs'] if n not in produced and n not in inputs]
+                produced.update(steps[p]['outputs'])
+            later={n for s in steps[span[-1]+1:] for n in s['inputs']}|set(recipe['outputs'])
+            if group['inputs']!=inputs or set(group['outputs'])!=produced&later:return {},set(),'group differs from plan dataflow'
+            raw=(root/group['member']).read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=group['sha256']:return {},set(),'member hash changed'
+            program=self.sdk.Runnable(self.sdk.ir.Runnable.deserialize(raw)).to(self.device);inner=program._inner
+            if (inner.expected_num_fusion!=8
+                    or [list(s.host_sizes) for s in inner.input_dram_shapes]!=[specs[n]['shape'] for n in group['inputs']]
+                    or [list(s.host_sizes) for s in inner.output_dram_shapes]!=[specs[n]['shape'] for n in group['outputs']]):
+                return {},set(),'merged runnable ABI differs from plan'
+            merged.append((span[0],(group,program)));covered.update(span)
+        self._merged_programs[entry]=[program for _,(_,program) in merged]
+        return dict(merged),covered,'used'
     def _sync(self):self.sdk.current_stream(self.torch.device(self.device)).synchronize()
     def _upload(self,value,spec):
         result=value.to(self.device)
@@ -565,7 +626,7 @@ class ExecutionFXB:
             finally:
                 for state in self._requests:state._tensors.clear();state._closed=True
                 self._requests.clear()
-                self._sequences.clear();self.programs.clear();self.resident.clear();self.states.clear();self._default_ready=False
+                self._sequences.clear();self._merged_programs.clear();self.programs.clear();self.resident.clear();self.states.clear();self._default_ready=False
                 if self.stack is not None:self.stack.close();self.stack=None
     def __exit__(self,kind,error,tb):
         try:self.close()
