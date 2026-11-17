@@ -298,6 +298,7 @@ class ExecutionFXB:
         from .memory import tensor_bytes
         self._state_bytes=sum(tensor_bytes(t) for t in self.plan['tensors'].values() if t['kind']=='state')
         self._replay_steps = {}
+        self._sequences = {}
         specs = self.plan['tensors']
         for entry, recipe in self.plan['entries'].items():
             last = _last_uses(recipe)
@@ -385,6 +386,47 @@ class ExecutionFXB:
                     del value
                 else:self.resident[name]=self.resident[uploaded[target]]
         self._sync();self.states={};self._default_ready=False;self.failed=False
+        self._build_sequences()
+    def _build_sequences(self):
+        """Replay each stateless entry as one SDK RunnableSequence: one host call per request.
+
+        Python per-step dispatch dominated small-kernel plans (RF-DETR: ~94% of the
+        frame was host time). Steps reading only resident tensors run once here and
+        their outputs become sequence constants.
+        """
+        from furiosa.torch._C import module as sdk_module
+        from .memory import tensor_bytes,check_budget
+        specs=self.plan['tensors']
+        for entry,recipe in self.plan['entries'].items():
+            names={n for step in recipe['steps'] for n in step['inputs']+step['outputs']}|set(recipe['inputs'])
+            if recipe['state_updates'] or any(specs[n]['kind']=='state' for n in names):continue
+            # shortcut: assumes the sequence may hold every intermediate at once; keeps the
+            # releasing step loop when a configured budget cannot cover that.
+            try:check_budget(sum(tensor_bytes(specs[n]) for n in names|set(self.resident)),self.plan.get('memory_policy'))
+            except ValueError:continue
+            builder=sdk_module._RunnableSequenceBuilder();nodes={};folded={}
+            for index,name in enumerate(recipe['inputs']):nodes[name]=builder.placeholder(index)
+            def node(name):
+                if name not in nodes:nodes[name]=builder.const_tensor(folded[name] if name in folded else self.resident[name])
+                return nodes[name]
+            for step in recipe['steps']:
+                program=self.programs[step['kernel']]
+                if all(n in folded or n in self.resident for n in step['inputs']):
+                    result=program(*(folded[n] if n in folded else self.resident[n] for n in step['inputs']))
+                    result=result if isinstance(result,(tuple,list)) else [result]
+                    if len(result)!=len(step['outputs']):raise ExecutionPlanError('Kernel output arity mismatch')
+                    for name,value in zip(step['outputs'],result):
+                        if not _tensor_matches(value,specs[name],self.torch) or value.device.type!='furiosa':
+                            raise ExecutionPlanError('NPU output metadata mismatch: '+name)
+                        folded[name]=value
+                    continue
+                inner=program._inner
+                launch=builder.runnable(inner.binary,inner.weight,inner.stacks,inner._flattened_params,
+                                        [node(n) for n in step['inputs']],inner)
+                for index,name in enumerate(step['outputs']):nodes[name]=builder.getitem(launch,index)
+            builder.output([node(n) for n in recipe['outputs']])
+            self._sequences[entry]=(builder.build(),folded)
+        self._sync()
     def _sync(self):self.sdk.current_stream(self.torch.device(self.device)).synchronize()
     def _upload(self,value,spec):
         result=value.to(self.device)
@@ -469,7 +511,20 @@ class ExecutionFXB:
                     trace_steps = os.environ.get('FXBX_TRACE_STEPS') == '1'
                     if trace_steps:
                         from furiosa.torch.profiler import RecordFunction
-                    for index, (kernel, input_names, outputs, release) in enumerate(self._replay_steps[entry]):
+                    # Per-step spans need the step loop; everything else replays the prepared sequence.
+                    sequence = None if trace_steps else self._sequences.get(entry)
+                    folded = {}
+                    if sequence is not None:
+                        program, folded = sequence
+                        result = program.run([tensors[name] for name in recipe['inputs']])
+                        if len(result) != len(recipe['outputs']):raise ExecutionPlanError('Sequence output arity mismatch')
+                        for name, value in zip(recipe['outputs'], result):
+                            if not _tensor_matches(value,self.plan['tensors'][name],self.torch) or value.device.type!='furiosa':
+                                raise ExecutionPlanError('NPU output metadata mismatch: '+name)
+                            tensors[name] = value
+                        del result
+                    steps = () if sequence is not None else self._replay_steps[entry]
+                    for index, (kernel, input_names, outputs, release) in enumerate(steps):
                         args = tuple(tensors[name] for name in input_names)
                         if trace_steps:
                             with RecordFunction(f'execution_plan::{entry}::{index}::{kernel}', propagate=True):
@@ -489,7 +544,7 @@ class ExecutionFXB:
                         del result,value
                         for name in release:
                             tensors.pop(name, None)
-                    persistent_outputs=set(self.resident)|set(active)|set(recipe['state_updates'].values())|_zero_input_outputs(recipe)
+                    persistent_outputs=set(self.resident)|set(active)|set(recipe['state_updates'].values())|_zero_input_outputs(recipe)|set(folded)
                     output=tuple(tensors[n].cpu() if output_device=='cpu' else
                                  tensors[n].clone() if n in persistent_outputs else tensors[n]
                                  for n in recipe['outputs'])
@@ -510,7 +565,7 @@ class ExecutionFXB:
             finally:
                 for state in self._requests:state._tensors.clear();state._closed=True
                 self._requests.clear()
-                self.programs.clear();self.resident.clear();self.states.clear();self._default_ready=False
+                self._sequences.clear();self.programs.clear();self.resident.clear();self.states.clear();self._default_ready=False
                 if self.stack is not None:self.stack.close();self.stack=None
     def __exit__(self,kind,error,tb):
         try:self.close()
