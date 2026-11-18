@@ -103,3 +103,29 @@ class Hub(unittest.TestCase):
   entry={'model':{'name':'Display','source_repo':'org/short'},'release':{'version':'current','artifact_url':'https://huggingface.co/org/release/resolve/'+'a'*40+'/model.fxbex','author_sha256':'b'*64}}
   with patch('fxbex.hub.urlopen',return_value=io.BytesIO(json.dumps({'models':[entry]}).encode())):
    with self.assertRaisesRegex(ValueError,'checksum'):resolve_package('short')
+
+
+class MergedSidecar(unittest.TestCase):
+ def test_sidecar_is_fetched_from_the_pinned_commit_and_extracted(self):
+  import zipfile
+  from fxbex.hub import _fetch_merged
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);target=root/'m.fxbx';target.write_bytes(b'pkg');archive=root/'s.zip'
+   with zipfile.ZipFile(archive,'w') as z:z.writestr('manifest.json','{}');z.writestr('g0.bin',b'x')
+   calls=[]
+   def download(repo,file,revision,**k):calls.append((repo,file,revision));return str(archive)
+   _fetch_merged(download,'org/r','dir/m.fxbx','a'*40,target,False)
+   self.assertEqual(calls,[('org/r','dir/m.fxbx.merged.zip','a'*40)])
+   self.assertEqual((root/'m.fxbx.merged'/'g0.bin').read_bytes(),b'x')
+ def test_absent_or_unsafe_sidecar_is_skipped(self):
+  import zipfile
+  from fxbex.hub import _fetch_merged
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);target=root/'m.fxbx';target.write_bytes(b'pkg')
+   def missing(*a,**k):raise FileNotFoundError('404')
+   _fetch_merged(missing,'org/r','m.fxbx','a'*40,target,False)
+   bad=root/'bad.zip'
+   with zipfile.ZipFile(bad,'w') as z:z.writestr('manifest.json','{}');z.writestr('../escape','x')
+   _fetch_merged(lambda *a,**k:str(bad),'org/r','m.fxbx','a'*40,target,False)
+   _fetch_merged(lambda *a,**k:str(target),'org/r','m.fxbx','a'*40,target,False)  # not a zip
+   self.assertFalse((root/'m.fxbx.merged').exists());self.assertFalse((root/'escape').exists())
