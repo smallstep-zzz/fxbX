@@ -20,6 +20,19 @@ from .native_fxb import (MAX_EXECUTION_PLAN_SIZE, MAX_JSON_SIZE, MAX_PRODUCER_SI
                          PRODUCER_MEMBER, NativeFXBError, _producer_json, validate_native)
 
 
+def _merged_sdk_matches(recorded,installed):
+    """Merged Runnables are serialized by furiosa-torch, which must match exactly.
+
+    furiosa-tcc only compiled them; a patch release (2026.4.1 vs 2026.4.0) is accepted.
+    Measured: a Laya group compiled with TCC 2026.4.1 matched the per-step result on 2026.4.0.
+    """
+    for name,version in recorded.items():
+        have=installed(name)
+        if have==version:continue
+        if name!='furiosa-tcc' or have.split('.')[:2]!=version.split('.')[:2]:return False
+    return True
+
+
 class ExecutionPlanError(NativeFXBError):
     pass
 
@@ -445,8 +458,8 @@ class ExecutionFXB:
     def _merged_groups(self,entry,recipe):
         """Optional sidecar MODEL.fxbx.merged/: SDK-serialized Runnables, each covering consecutive plan steps.
 
-        These are not EDFs. They load only with the exact SDK versions that wrote them and the
-        same plan hash, and only when each group matches the plan's dataflow and tensor shapes.
+        These are not EDFs. They load only with the furiosa-torch version that wrote them (TCC may
+        differ in its patch number: see _merged_sdk_matches) and the same plan hash, and only when each group matches the plan's dataflow and tensor shapes.
         Anything else keeps the per-step EDFs and records why.
         """
         import importlib.metadata as metadata
@@ -457,7 +470,7 @@ class ExecutionFXB:
             manifest=json.loads((root/'manifest.json').read_text())
             if manifest.get('schema')!='fxbx.merged-runnables.v1' or manifest.get('execution_plan_sha256')!=_sha(self.plan):
                 return {},set(),'plan hash differs'
-            if any(metadata.version(p)!=v for p,v in manifest['packages'].items()):return {},set(),'SDK version differs'
+            if not _merged_sdk_matches(manifest['packages'],metadata.version):return {},set(),'SDK version differs'
             groups=manifest['entries'].get(entry) or []
         except (OSError,ValueError,KeyError,TypeError,AttributeError,metadata.PackageNotFoundError) as exc:
             return {},set(),f'unreadable manifest: {exc}'
