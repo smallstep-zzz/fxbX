@@ -35,3 +35,19 @@ class Compatibility(unittest.TestCase):
   with patch('fxbex.runtime.environment',return_value=versions),patch('sys.version_info',(3,11,0)):
    with self.assertRaisesRegex(ValueError,'Known unstable'):
     package_compatibility({'model':{'name':'RedHatAI/Qwen3.5-9B-FP8-dynamic'},'compatibility':{'packages':{}}},allow_sdk_mismatch=True)
+
+
+class MergedSidecarSDK(unittest.TestCase):
+    def check(self, recorded, installed):
+        from fxbex.execution_fxb import _merged_sdk_matches
+        return _merged_sdk_matches(recorded, installed.__getitem__)
+
+    def test_tcc_patch_release_is_accepted(self):
+        self.assertTrue(self.check({'furiosa-torch': '2026.4.0', 'furiosa-tcc': '2026.4.1'},
+                                   {'furiosa-torch': '2026.4.0', 'furiosa-tcc': '2026.4.0'}))
+
+    def test_tcc_minor_release_is_rejected(self):
+        self.assertFalse(self.check({'furiosa-tcc': '2026.5.0'}, {'furiosa-tcc': '2026.4.0'}))
+
+    def test_furiosa_torch_must_match_exactly(self):
+        self.assertFalse(self.check({'furiosa-torch': '2026.4.1'}, {'furiosa-torch': '2026.4.0'}))

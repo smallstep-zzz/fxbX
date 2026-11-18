@@ -1,5 +1,5 @@
 """Resolve catalog model IDs to immutable, checksum-verified HF packages."""
-import hashlib,json,os,sys,shutil,tempfile
+import hashlib,json,os,sys,shutil,tempfile,zipfile
 from pathlib import Path
 from urllib.request import urlopen
 from urllib.parse import urlsplit
@@ -17,6 +17,30 @@ def _local_package(path, *, announce=True):
     selected=max(candidates,key=lambda p:(p.stat().st_mtime_ns,str(p)))
     if announce:print('Selected model: '+str(selected.resolve()),file=sys.stderr,flush=True)
     return selected.resolve()
+
+
+def _fetch_merged(download, repo, member, revision, target, refresh):
+    """Optional merged-Runnable sidecar stored beside the package at the same pinned commit.
+
+    The commit pins its bytes like the package; ExecutionFXB still checks the plan hash,
+    SDK versions, member hashes and dataflow before using it. Absent or invalid: skipped.
+    """
+    side=target.with_name(target.name+'.merged')
+    if side.is_dir() and not refresh:return
+    try:archive=download(repo,member+'.merged.zip',revision=revision,force_download=refresh)
+    except Exception:return  # this release has no merged sidecar
+    try:
+        with zipfile.ZipFile(archive) as z:
+            infos=z.infolist()
+            if ('manifest.json' not in {i.filename for i in infos} or sum(i.file_size for i in infos)>(8<<30)
+                    or any(i.filename.startswith('/') or '..' in Path(i.filename).parts for i in infos)):
+                raise ValueError('unsafe merged sidecar')
+            staged=Path(tempfile.mkdtemp(prefix='.merged-',dir=target.parent))
+            z.extractall(staged)
+        shutil.rmtree(side,ignore_errors=True);os.replace(staged,side)
+        print('Merged runnables saved: '+str(side),file=sys.stderr,flush=True)
+    except (zipfile.BadZipFile,OSError,ValueError) as exc:
+        print('Merged sidecar skipped: '+str(exc),file=sys.stderr,flush=True)
 
 
 def catalog_matches(catalog,name,version=None):
@@ -111,4 +135,5 @@ def resolve_package(value, *, refresh=False):
     finally:
         if os.path.exists(temp):os.unlink(temp)
     print('Model saved: '+str(target.resolve()),file=sys.stderr,flush=True)
+    _fetch_merged(hf_hub_download,'/'.join(parts[:2]),'/'.join(parts[4:]),parts[3],target,refresh)
     return target.resolve()
