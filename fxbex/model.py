@@ -31,7 +31,11 @@ class Model:
         with self._lock:self._service.unload()
     unload=close
     def __enter__(self):return self
-    def __exit__(self,*args):self.close()
+    def __exit__(self,kind,error,tb):
+        try:self.close()
+        except BaseException as cleanup:
+            if error is not None:raise error.with_traceback(tb) from cleanup
+            raise
 
 class YOLO(Model):
     """Detection adapter must accept {'image': server_path, ...options}."""
