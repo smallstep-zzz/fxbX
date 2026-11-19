@@ -169,3 +169,21 @@ class OriginalCheckpoint(unittest.TestCase):
      {'enc.query.weight':{'shape':[2,2],'stride':[2,1],'dtype':'bfloat16'}})
    bad=dict(source,files={'model.safetensors':'0'*64})
    with self.assertRaisesRegex(ValueError,'checksum'):original_checkpoint(bad,download=download)
+
+ def test_row_slices_and_package_tensors_bind_with_the_original(self):
+  import torch
+  from safetensors.torch import save_file
+  from fxbex.checkpoint import SafeTensorWeights
+  with tempfile.TemporaryDirectory() as d:
+   original=Path(d)/'model.safetensors';qkv=torch.randn(6,2)
+   save_file({'attn.in_proj_weight':qkv},str(original))
+   weights=SafeTensorWeights(original,names={'attn.in_proj_weight[2:4]':'attn.in_proj_weight'},
+                             extra={'net.inv_freq':torch.arange(2,dtype=torch.float32)})
+   weights.validate({'attn.in_proj_weight[2:4]':{'shape':[2,2],'stride':[2,1],'dtype':'bfloat16','checkpoint_dtype':'float32',
+                                                 'checkpoint_key':'attn.in_proj_weight','checkpoint_slice':[2,4]},
+                     'net.inv_freq':{'shape':[2],'stride':[1],'dtype':'float32','package_tensor':True}})
+   self.assertTrue(torch.equal(weights['attn.in_proj_weight[2:4]'],qkv[2:4].bfloat16()))
+   self.assertTrue(torch.equal(weights['net.inv_freq'],torch.arange(2.)))
+   with self.assertRaisesRegex(ValueError,'out of range'):
+    SafeTensorWeights(original,names={'x':'attn.in_proj_weight'}).validate(
+     {'x':{'shape':[2,2],'stride':[2,1],'dtype':'float32','checkpoint_slice':[5,7]}})

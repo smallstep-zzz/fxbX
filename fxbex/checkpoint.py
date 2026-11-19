@@ -21,8 +21,10 @@ class SafeTensorWeights(Mapping):
     explicitly selects a subset; otherwise every checkpoint tensor must be bound.
     No tensor payload is read at construction or validate(). Keep files immutable
     while a session uses them. Values are never cached on the CPU by this object.
+    ``extra`` maps further targets to small in-memory tensors (a package's derived
+    buffers); plan specs may slice rows (checkpoint_slice) or cast (checkpoint_dtype).
     """
-    def __init__(self, path, *, names=None):
+    def __init__(self, path, *, names=None, extra=None):
         from safetensors import safe_open
         path = Path(path).absolute()
         indexed = None
@@ -64,25 +66,39 @@ class SafeTensorWeights(Mapping):
                                   for k, v in self.names.items())):
             raise ValueError('explicit target mapping names an unknown checkpoint tensor')
         self.loaded_tensors = 0
-        self._casts = {}
+        self._casts = {}; self._slices = {}
+        self.extra = dict(extra or {})
 
     @staticmethod
     def _identity(path):
         s = path.stat()
         return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
 
-    def __iter__(self): return iter(self.names)
-    def __len__(self): return len(self.names)
+    def __iter__(self): return iter({**self.names, **self.extra})
+    def __len__(self): return len(set(self.names) | set(self.extra))
 
     def validate(self, targets):
-        if set(targets) != set(self.names):
+        if set(targets) != set(self.names) | set(self.extra):
             raise ValueError('checkpoint targets differ; supply an explicit names mapping for a subset')
         for target, spec in targets.items():
-            declared = self._specs[self.names[target]]
-            shape = declared['shape']; stride = []; size = 1
-            for dim in reversed(shape):
-                stride.insert(0, size); size *= max(dim, 1)
             wanted = str(spec['dtype']).removeprefix('torch.')
+            stride = []; size = 1
+            for dim in reversed(spec['shape']):
+                stride.insert(0, size); size *= max(dim, 1)
+            if target in self.extra:
+                value = self.extra[target]
+                if (list(value.shape) != spec['shape'] or str(value.dtype).removeprefix('torch.') != wanted
+                        or stride != spec['stride']):
+                    raise ValueError('package tensor shape/dtype/contiguous layout differs: ' + target)
+                continue
+            declared = self._specs[self.names[target]]
+            shape = list(declared['shape'])
+            if 'checkpoint_slice' in spec:  # a row block of a fused original tensor
+                start, stop = spec['checkpoint_slice']
+                if not shape or not 0 <= start < stop <= shape[0]:
+                    raise ValueError('checkpoint row slice is out of range: ' + target)
+                shape[0] = stop - start
+                self._slices[target] = (start, stop)
             stored = spec.get('checkpoint_dtype', wanted)  # original checkpoints are cast at load
             if declared['dtype'] != stored or shape != spec['shape'] or stride != spec['stride']:
                 raise ValueError('checkpoint shape/dtype/contiguous layout differs: ' + target)
@@ -94,12 +110,17 @@ class SafeTensorWeights(Mapping):
 
     def __getitem__(self, target):
         from safetensors import safe_open
+        if target in self.extra:
+            return self.extra[target]
         name = self.names[target]; file = self._files[name]
         if self._identity(file) != self._identities[file]:
             raise ValueError('checkpoint changed after metadata admission')
         with safe_open(str(file), framework='pt', device='cpu') as reader:
             tensor = reader.get_tensor(name)
         self.loaded_tensors += 1
+        if target in self._slices:
+            start, stop = self._slices[target]
+            tensor = tensor[start:stop].contiguous()
         if target in self._casts:
             import torch
             tensor = tensor.to(getattr(torch, self._casts[target]))
