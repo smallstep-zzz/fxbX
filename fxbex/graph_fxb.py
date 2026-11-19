@@ -100,6 +100,10 @@ def read_graph_plan(path, *, verify_official=False):
     report = validate_native(path, verify_official=verify_official)
     producer = report['producer_metadata'] or {}
     plan = producer.get('graph_plan')
+    if plan is None and 'execution_plan' not in producer:
+        raise GraphFXBError(
+            'NATIVE_FXB_WITHOUT_GRAPH_PLAN: GraphFXB needs an execution plan or legacy graph plan. '
+            'Open an official LLM FXB with furiosa_llm.LLM(model_dir, fxb=path).')
     if (not isinstance(plan, dict) or plan.get('schema') != 'fxbex.graph-plan.v1'
             or producer.get('graph_plan_sha256') != _sha(plan)):
         raise GraphFXBError('Missing or changed graph execution plan')
@@ -171,8 +175,11 @@ class GraphFXB:
         self.stack = ExitStack()
         try:
             return self._load()
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                raise error from cleanup
             raise
 
     def _load(self):
@@ -274,8 +281,13 @@ class GraphFXB:
             self.program = None
             self.resident_weights.clear()
             if self.stack is not None:
-                self.stack.close()
-                self.stack = None
+                stack, self.stack = self.stack, None
+                stack.close()
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, kind, error, tb):
+        try:
+            self.close()
+        except BaseException as cleanup:
+            if error is not None:
+                raise error.with_traceback(tb) from cleanup
+            raise

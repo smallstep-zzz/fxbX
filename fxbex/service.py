@@ -108,6 +108,7 @@ class PackageService:
 
 
 def _stop_all():
-    for service in list(_services):service.stop()
+    for service in list(_services):
+        with contextlib.suppress(BaseException):service.stop()
 
 atexit.register(_stop_all)

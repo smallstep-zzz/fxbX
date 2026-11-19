@@ -53,6 +53,48 @@ def _run_native_graph_sample(package, output):
     return 0
 
 
+def _native_manifest(path):
+    """Return a native FXB v2 manifest, or None for FXB_EX packages and catalog names."""
+    from .native_fxb import MAX_JSON_SIZE
+    try:
+        with ZipFile(path) as archive:
+            if archive.getinfo('manifest.json').file_size > MAX_JSON_SIZE:
+                raise ValueError('Manifest exceeds JSON limit')
+            manifest = json.loads(archive.read('manifest.json'))
+    except (FileNotFoundError, IsADirectoryError, BadZipFile, KeyError):
+        return None
+    if isinstance(manifest, dict) and manifest.get('format_version') == 2 and manifest.get('format') != 'FXB_EX':
+        return manifest
+    return None
+
+
+def _inspect_native(path, manifest, memory):
+    from .native_fxb import validate_native
+    result = validate_native(path, verify_official=False)
+    producer = result.pop('producer_metadata') or {}
+    result['model'] = manifest.get('model')
+    if 'execution_plan' in producer:
+        from .execution_fxb import read_execution_plan, _memory_gate
+        plan = read_execution_plan(path)
+        result['execution_plan'] = {'schema': plan.get('schema'), 'entries': {
+            name: {'inputs': entry['inputs'], 'outputs': entry['outputs'], 'steps': len(entry['steps'])}
+            for name, entry in plan['entries'].items()}}
+        result['compatibility'] = plan['compatibility']
+        if memory:
+            result['memory_plan'] = _memory_gate(plan)
+    elif 'graph_plan' in producer:
+        from .graph_fxb import read_graph_plan
+        plan = read_graph_plan(path)
+        result['execution_plan'] = plan
+        result['compatibility'] = plan['compatibility']
+    else:
+        result['execution_plan'] = None
+        result['compatibility'] = manifest.get('versions')
+        result['runtime'] = 'furiosa_llm.LLM(model_dir, fxb=path)'
+    result['compatibility_scope'] = 'recorded contract only; current environment and NPU execution not checked'
+    return result
+
+
 def _save_result(result, report_dir, output):
     result['report_dir'] = str(report_dir)
     destination = Path(output).resolve() if output else report_dir / 'result.json'
@@ -214,7 +256,9 @@ Run precompiled packages from a file or the model catalog.""")
             raise ValueError('Image file does not exist')
         if sample_contract['method']=='chat' and not args.sample:
             sample_contract=None
-    if args.action == 'inspect':
+    if args.action == 'inspect' and _native_manifest(args.package) is not None:
+        result=_inspect_native(args.package,_native_manifest(args.package),args.memory)
+    elif args.action == 'inspect':
         m=inspect(args.package)
         result={'model':m['model'],'runtime':m['runtime'],'compatibility':m['compatibility'],
                 'standalone':m['standalone'],'bundled_python':bool(m['runtime'].get('bundled_python')),

@@ -106,12 +106,23 @@ def _validate(archive, max_total_size, max_json_size, *, verify_hashes=True):
     for name in members:
         if any(str(parent) in members for parent in PurePosixPath(name).parents if str(parent) != '.'):
             raise PackageError(f'Member conflicts with parent file: {name}')
-    for name in ('manifest.json', *REQUIRED):
+    if 'manifest.json' not in members:
+        raise PackageError('Missing required member: manifest.json')
+    if members['manifest.json'].file_size > max_json_size:
+        raise PackageError('JSON exceeds size limit: manifest.json')
+    manifest = _json(archive.read('manifest.json'), 'manifest.json')
+    if (isinstance(manifest, dict) and type(manifest.get('format_version')) is int
+            and manifest['format_version'] == 2 and manifest.get('format') != 'FXB_EX'):
+        raise PackageError(
+            'NATIVE_FXB_REQUIRES_EXPLICIT_LOADER: this is a native FXB, not an FXB_EX package. '
+            'Run an execution-plan .fxbx with `fxbx run` or fxbx.ExecutionFXB(path); '
+            'open an official LLM FXB with furiosa_llm.LLM(model_dir, fxb=path). '
+            'Renaming the file does not convert it.')
+    for name in REQUIRED:
         if name not in members:
             raise PackageError(f'Missing required member: {name}')
         if members[name].file_size > max_json_size:
             raise PackageError(f'JSON exceeds size limit: {name}')
-    manifest = _json(archive.read('manifest.json'), 'manifest.json')
     _manifest(manifest)
     if set(members) != {'manifest.json', *manifest['files']}:
         raise PackageError('Archive members do not match manifest integrity map')
