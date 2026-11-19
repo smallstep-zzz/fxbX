@@ -129,3 +129,49 @@ class MergedSidecar(unittest.TestCase):
    _fetch_merged(lambda *a,**k:str(bad),'org/r','m.fxbx','a'*40,target,False)
    _fetch_merged(lambda *a,**k:str(target),'org/r','m.fxbx','a'*40,target,False)  # not a zip
    self.assertFalse((root/'m.fxbx.merged').exists());self.assertFalse((root/'escape').exists())
+
+
+class Companions(unittest.TestCase):
+ def test_sample_and_recipe_are_fetched_beside_the_package(self):
+  from fxbex.hub import _fetch_companions
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);target=root/'m.fxbx';target.write_bytes(b'pkg');src=root/'src';src.write_bytes(b'data')
+   calls=[]
+   def download(repo,file,revision,**k):calls.append(file);return str(src)
+   _fetch_companions(download,'org/r','dir/m.fxbx','a'*40,target,False)
+   self.assertEqual(calls,['dir/m.fxbx.sample.safetensors','dir/m.fxbx.weights.json'])
+   self.assertEqual((root/'m.fxbx.weights.json').read_bytes(),b'data')
+   def missing(*a,**k):raise FileNotFoundError('404')
+   other=root/'n.fxbx';other.write_bytes(b'pkg');_fetch_companions(missing,'org/r','n.fxbx','a'*40,other,False)
+   self.assertFalse((root/'n.fxbx.weights.json').exists())
+
+ def test_weights_are_converted_from_the_pinned_original(self):
+  import hashlib,torch
+  from safetensors.torch import save_file,load_file
+  from fxbex.hub import ensure_weights
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);package=root/'m.fxbx';package.write_bytes(b'pkg');original=root/'orig.safetensors'
+   save_file({'enc.attention.query.weight':torch.ones(2,2),'head.bias':torch.zeros(2)},str(original))
+   digest=hashlib.sha256(original.read_bytes()).hexdigest()
+   recipe={'schema':'fxbx.weights-recipe.v1','source':{'repo':'org/orig','revision':'b'*40,'files':{'model.safetensors':digest}},
+           'rename':[['^','net.'],[r'\.attention\.query\.','.q_proj.']],'dtype':'bfloat16'}
+   (root/'m.fxbx.weights.json').write_text(json.dumps(recipe))
+   calls=[]
+   def download(repo,file,revision,**k):calls.append((repo,file,revision));return str(original)
+   ensure_weights(package,download=download)
+   self.assertEqual(calls,[('org/orig','model.safetensors','b'*40)])
+   out=load_file(str(root/'m.fxbx.weights'/'model.safetensors'))
+   self.assertEqual(sorted(out),['net.enc.q_proj.weight','net.head.bias']);self.assertEqual(out['net.head.bias'].dtype,torch.bfloat16)
+   self.assertIsNone(ensure_weights(package,download=lambda *a,**k:self.fail('converted twice')))
+
+ def test_checksum_mismatch_leaves_no_weights(self):
+  import torch
+  from safetensors.torch import save_file
+  from fxbex.hub import ensure_weights
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);package=root/'m.fxbx';package.write_bytes(b'pkg');original=root/'orig.safetensors'
+   save_file({'w':torch.ones(1)},str(original))
+   recipe={'schema':'fxbx.weights-recipe.v1','source':{'repo':'org/orig','revision':'b'*40,'files':{'model.safetensors':'0'*64}}}
+   (root/'m.fxbx.weights.json').write_text(json.dumps(recipe))
+   with self.assertRaisesRegex(ValueError,'checksum'):ensure_weights(package,download=lambda *a,**k:str(original))
+   self.assertFalse((root/'m.fxbx.weights').exists())
