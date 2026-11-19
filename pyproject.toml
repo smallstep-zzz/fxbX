@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fxbx"
-version = "0.9.2"
+version = "0.9.3"
 description = "Furiosa RNGD 사전 컴파일 모델 다운로드 및 실행 CLI"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
