@@ -64,6 +64,7 @@ class SafeTensorWeights(Mapping):
                                   for k, v in self.names.items())):
             raise ValueError('explicit target mapping names an unknown checkpoint tensor')
         self.loaded_tensors = 0
+        self._casts = {}
 
     @staticmethod
     def _identity(path):
@@ -81,8 +82,12 @@ class SafeTensorWeights(Mapping):
             shape = declared['shape']; stride = []; size = 1
             for dim in reversed(shape):
                 stride.insert(0, size); size *= max(dim, 1)
-            if declared['dtype'] != str(spec['dtype']).removeprefix('torch.') or shape != spec['shape'] or stride != spec['stride']:
+            wanted = str(spec['dtype']).removeprefix('torch.')
+            stored = spec.get('checkpoint_dtype', wanted)  # original checkpoints are cast at load
+            if declared['dtype'] != stored or shape != spec['shape'] or stride != spec['stride']:
                 raise ValueError('checkpoint shape/dtype/contiguous layout differs: ' + target)
+            if stored != wanted:
+                self._casts[target] = wanted
         for file, identity in self._identities.items():
             if self._identity(file) != identity:
                 raise ValueError('checkpoint changed after metadata admission')
@@ -95,4 +100,7 @@ class SafeTensorWeights(Mapping):
         with safe_open(str(file), framework='pt', device='cpu') as reader:
             tensor = reader.get_tensor(name)
         self.loaded_tensors += 1
+        if target in self._casts:
+            import torch
+            tensor = tensor.to(getattr(torch, self._casts[target]))
         return tensor

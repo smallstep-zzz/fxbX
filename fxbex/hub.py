@@ -43,6 +43,54 @@ def _fetch_merged(download, repo, member, revision, target, refresh):
         print('Merged sidecar skipped: '+str(exc),file=sys.stderr,flush=True)
 
 
+def _fetch_companions(download, repo, member, revision, target, refresh):
+    """Optional sample input stored beside the package at the same pinned commit.
+
+    MEMBER.sample.safetensors -> TARGET.sample.safetensors (`fxbx run --sample` input).
+    Weights are never republished: the plan names the original checkpoint (original_checkpoint).
+    """
+    local=target.with_name(target.name+'.sample.safetensors')
+    if local.is_file() and not refresh:return
+    try:path=download(repo,member+'.sample.safetensors',revision=revision,force_download=refresh)
+    except Exception:return  # this release does not ship a sample
+    fd,temp=tempfile.mkstemp(prefix='.sample-',dir=target.parent);os.close(fd)
+    try:shutil.copyfile(path,temp);os.replace(temp,local)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
+    print('Sample saved: '+str(local),file=sys.stderr,flush=True)
+
+
+def original_checkpoint(source, *, download=None):
+    """Download the original HF checkpoint a plan names and verify every file's SHA-256.
+
+    source = plan['source_metadata']['checkpoint'] = {'repo', 'revision' (40-hex commit),
+    'files': {name: sha256}}. Files land in the normal Hugging Face cache, as for .fxb models.
+    Returns the single safetensors file, or the snapshot folder for an indexed sharded checkpoint.
+    """
+    import re
+    repo,revision,files=source.get('repo',''),source.get('revision',''),source.get('files') or {}
+    if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo) or not re.fullmatch('[0-9a-f]{40}',revision) or not files
+            or any(not re.fullmatch(r'[A-Za-z0-9_.-]+\.safetensors(\.index\.json)?',f) or not re.fullmatch('[0-9a-f]{64}',h)
+                   for f,h in files.items())):
+        raise ValueError('Invalid original checkpoint reference')
+    if download is None:
+        try:from huggingface_hub import hf_hub_download as download
+        except ImportError:raise RuntimeError('Install download support: pip install huggingface_hub') from None
+    print(f'Original weights: {repo}@{revision[:8]}',file=sys.stderr,flush=True)
+    paths={}
+    for name,expected in sorted(files.items()):
+        path=Path(download(repo,name,revision=revision));h=hashlib.sha256()
+        with path.open('rb') as stream:
+            for block in iter(lambda:stream.read(1024*1024),b''):h.update(block)
+        if h.hexdigest()!=expected:raise ValueError('Original checkpoint checksum mismatch: '+name)
+        paths[name]=path
+    shards=[n for n in paths if n.endswith('.safetensors')]
+    if len(shards)==1:return paths[shards[0]]
+    index=[n for n in paths if n.endswith('.index.json')]
+    if len(index)!=1:raise ValueError('Sharded original checkpoint needs its index file')
+    return paths[index[0]].parent
+
+
 def catalog_matches(catalog,name,version=None):
     matches=[p for p in catalog['models'] if name in (p['model']['name'],p['model']['source_repo'],p['model']['source_repo'].split('/')[-1]) and (version is None or p['release']['version']==version)]
     sources={p['model']['source_repo'] for p in matches}
@@ -136,4 +184,5 @@ def resolve_package(value, *, refresh=False):
         if os.path.exists(temp):os.unlink(temp)
     print('Model saved: '+str(target.resolve()),file=sys.stderr,flush=True)
     _fetch_merged(hf_hub_download,'/'.join(parts[:2]),'/'.join(parts[4:]),parts[3],target,refresh)
+    _fetch_companions(hf_hub_download,'/'.join(parts[:2]),'/'.join(parts[4:]),parts[3],target,refresh)
     return target.resolve()

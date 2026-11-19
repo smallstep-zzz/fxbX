@@ -129,3 +129,43 @@ class MergedSidecar(unittest.TestCase):
    _fetch_merged(lambda *a,**k:str(bad),'org/r','m.fxbx','a'*40,target,False)
    _fetch_merged(lambda *a,**k:str(target),'org/r','m.fxbx','a'*40,target,False)  # not a zip
    self.assertFalse((root/'m.fxbx.merged').exists());self.assertFalse((root/'escape').exists())
+
+
+
+class Companions(unittest.TestCase):
+ def test_sample_is_fetched_beside_the_package(self):
+  from fxbex.hub import _fetch_companions
+  with tempfile.TemporaryDirectory() as d:
+   root=Path(d);target=root/'m.fxbx';target.write_bytes(b'pkg');src=root/'src';src.write_bytes(b'sample')
+   calls=[]
+   def download(repo,file,revision,**k):calls.append(file);return str(src)
+   _fetch_companions(download,'org/r','dir/m.fxbx','a'*40,target,False)
+   self.assertEqual(calls,['dir/m.fxbx.sample.safetensors'])
+   self.assertEqual((root/'m.fxbx.sample.safetensors').read_bytes(),b'sample')
+   def missing(*a,**k):raise FileNotFoundError('404')
+   other=root/'n.fxbx';other.write_bytes(b'pkg');_fetch_companions(missing,'org/r','n.fxbx','a'*40,other,False)
+   self.assertFalse((root/'n.fxbx.sample.safetensors').exists())
+
+
+class OriginalCheckpoint(unittest.TestCase):
+ def test_pinned_original_is_verified_and_cast_at_load(self):
+  import torch
+  from safetensors.torch import save_file
+  from fxbex.hub import original_checkpoint
+  from fxbex.checkpoint import SafeTensorWeights
+  with tempfile.TemporaryDirectory() as d:
+   original=Path(d)/'model.safetensors'
+   save_file({'enc.query.weight':torch.ones(2,2),'unused':torch.zeros(1)},str(original))
+   source={'repo':'org/orig','revision':'b'*40,'files':{'model.safetensors':hashlib.sha256(original.read_bytes()).hexdigest()}}
+   calls=[]
+   def download(repo,file,revision,**k):calls.append((repo,file,revision));return str(original)
+   path=original_checkpoint(source,download=download)
+   self.assertEqual(calls,[('org/orig','model.safetensors','b'*40)])
+   weights=SafeTensorWeights(path,names={'enc.query.weight':'enc.query.weight'})
+   weights.validate({'enc.query.weight':{'shape':[2,2],'stride':[2,1],'dtype':'bfloat16','checkpoint_dtype':'float32'}})
+   self.assertEqual(weights['enc.query.weight'].dtype,torch.bfloat16)
+   with self.assertRaisesRegex(ValueError,'differs'):
+    SafeTensorWeights(path,names={'enc.query.weight':'enc.query.weight'}).validate(
+     {'enc.query.weight':{'shape':[2,2],'stride':[2,1],'dtype':'bfloat16'}})
+   bad=dict(source,files={'model.safetensors':'0'*64})
+   with self.assertRaisesRegex(ValueError,'checksum'):original_checkpoint(bad,download=download)

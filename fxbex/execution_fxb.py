@@ -173,6 +173,9 @@ def validate_execution_plan(plan, *, archived=False):
         spec(value);kind=value.get('kind')
         if kind not in ('user_input','parameter','buffer','state','intermediate'):fail('Unsupported tensor kind')
         if kind in ('parameter','buffer') and not identifier(value.get('target')):fail('External state_dict target is required')
+        if 'checkpoint_dtype' in value and (kind not in ('parameter','buffer') or value['checkpoint_dtype'] not in ('float32','float16','bfloat16')
+                or value['dtype'].removeprefix('torch.') not in ('float32','float16','bfloat16')):
+            fail('checkpoint_dtype casts only external floating tensors')
         if 'value_range' in value:
             bounds=value['value_range']
             if (kind not in ('user_input','parameter','buffer') or value['dtype'].removeprefix('torch.')!='int32'
@@ -281,6 +284,14 @@ def _archive_plan(archive):
     return plan
 
 
+def _from_checkpoint(value,spec,torch):
+    """Cast a tensor given in the plan's declared original-checkpoint dtype to the plan dtype."""
+    stored=spec.get('checkpoint_dtype')
+    if stored and isinstance(value,torch.Tensor) and str(value.dtype).removeprefix('torch.')==stored:
+        return value.to(getattr(torch,spec['dtype'].removeprefix('torch.')))
+    return value
+
+
 def read_execution_plan(path):
     validate_native(path,verify_official=False)
     with zipfile.ZipFile(path) as archive:
@@ -302,6 +313,11 @@ class ExecutionFXB:
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
         from .checkpoint import SafeTensorWeights
         self.path=Path(path);self.plan=read_execution_plan(path)
+        if weights is None and isinstance(self.plan['source_metadata'].get('checkpoint'),dict):
+            # Like furiosa-llm .fxb: the package names the original HF checkpoint and holds no weight copy.
+            from .hub import original_checkpoint
+            targets={s['target'] for s in self.plan['tensors'].values() if s['kind'] in ('parameter','buffer')}
+            weights=SafeTensorWeights(original_checkpoint(self.plan['source_metadata']['checkpoint']),names={t:t for t in targets})
         self.weights=weights if isinstance(weights,SafeTensorWeights) else dict(weights or {})
         self.device=device;self.programs={};self.resident={};self.states={};self.stack=None;self.failed=False
         self.memory=_memory_gate(self.plan)
@@ -361,12 +377,13 @@ class ExecutionFXB:
         for name,spec in self.plan['tensors'].items():
             if spec['kind'] in ('parameter','buffer'):
                 if streaming:continue
-                value=self.weights.get(spec['target'])
+                value=_from_checkpoint(self.weights.get(spec['target']),spec,torch)
                 if not _tensor_matches(value,spec,torch) or value.requires_grad:
                     raise ExecutionPlanError('Missing/incompatible frozen external tensor: '+name)
                 _check_value_range(value,spec,torch)
         for guard in self.plan.get('frozen_buffer_guards',[]):
             value=self.weights[guard['target']]
+            value=_from_checkpoint(value,next(t for t in self.plan['tensors'].values() if t.get('target')==guard['target']),torch)
             if (list(value.shape)!=guard['shape']
                     or str(value.dtype).removeprefix('torch.')!=guard['dtype']
                     or frozen_buffer_sha256(value)!=guard['sha256']):
@@ -393,7 +410,7 @@ class ExecutionFXB:
             if spec['kind'] in ('parameter','buffer'):
                 target=spec['target']
                 if target not in uploaded:
-                    value=self.weights[target]
+                    value=_from_checkpoint(self.weights[target],spec,torch)
                     if not _tensor_matches(value,spec,torch) or value.requires_grad:
                         raise ExecutionPlanError('External tensor changed after admission: '+target)
                     self.resident[name]=self._upload(value.detach(),spec);uploaded[target]=name
