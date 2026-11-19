@@ -55,6 +55,18 @@ fxbx serve Qwen3.5-9B-FP8-dynamic --port 8000
 
 채팅은 `http://127.0.0.1:8000/v1/chat/completions`에서 OpenAI 호환 비스트리밍 요청을, 예측 모델은 `/predict`에서 JSON 입력을 받습니다. 지원하는 생성 옵션은 모델과 어댑터에 따라 달라집니다.
 
+### 브라우저 화면과 SSH 터널
+
+`fxbx serve`로 모델을 적재하면 `http://127.0.0.1:PORT/`에서 브라우저 실행 화면을 열 수 있습니다. 화면은 패키지의 입력 예제를 불러오고, 채팅 답변·생성 이미지·의사결정 결과를 표시합니다. 예제 입력은 [examples/web](examples/web)에 있습니다.
+
+원격 NPU 서버라면 내 컴퓨터에서 포트를 포워딩한 뒤 브라우저에서 같은 주소를 엽니다. `SERVER`는 실제 SSH 호스트나 별칭으로 바꿉니다.
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8081:127.0.0.1:8081 SERVER
+```
+
+이미지 생성 응답의 `image_path`는 서버의 파일 경로입니다. 첫 요청에는 런타임 준비 시간이 더해질 수 있습니다.
+
 ## 재사용 가능한 Gradio 모델 페이지
 
 이미 준비된 모델 파일을 로드하고 실행하는 예제입니다. Gradio를 설치한 뒤 `fxbx ui --port 7861`로 로컬 UI를 실행합니다. 모델별 화면을 만들려면 [examples/model_page.py](examples/model_page.py)를 복사하고 `PACKAGE`에 기존 모델 파일 경로를 지정하세요. 페이지에서 모델을 적재·해제하고 실행 시간을 확인할 수 있습니다.
