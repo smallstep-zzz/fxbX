@@ -121,6 +121,12 @@ def validate_native(path, *, verify_official=True):
                 if members[PRODUCER_MEMBER].file_size > MAX_PRODUCER_SIZE:
                     raise NativeFXBError('Native JSON exceeds size limit')
                 producer = _producer_json(archive.read(PRODUCER_MEMBER))
+                # An execution plan bound to an original checkpoint may ship its derived buffers.
+                plan = producer.get('execution_plan') if isinstance(producer, dict) else None
+                extra = ((plan or {}).get('source_metadata') or {}).get('checkpoint') or {}
+                extra = (extra.get('package_tensors') or {}).get('member') if isinstance(extra, dict) else None
+                if isinstance(extra, str) and extra.startswith('checkpoint/') and extra.endswith('.safetensors'):
+                    expected.add(_name(extra))
             if set(members) != expected:
                 raise NativeFXBError('Native archive members do not match manifest EDF references and producer metadata')
             if any(members[name].file_size == 0 for name in files):

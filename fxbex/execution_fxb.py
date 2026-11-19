@@ -173,6 +173,12 @@ def validate_execution_plan(plan, *, archived=False):
         spec(value);kind=value.get('kind')
         if kind not in ('user_input','parameter','buffer','state','intermediate'):fail('Unsupported tensor kind')
         if kind in ('parameter','buffer') and not identifier(value.get('target')):fail('External state_dict target is required')
+        if 'checkpoint_slice' in value:
+            bounds=value['checkpoint_slice']
+            if (kind not in ('parameter','buffer') or not identifier(value.get('checkpoint_key'))
+                    or not isinstance(bounds,list) or len(bounds)!=2 or any(type(b)!=int for b in bounds)
+                    or not 0<=bounds[0]<bounds[1] or not value['shape'] or bounds[1]-bounds[0]!=value['shape'][0]):
+                fail('checkpoint_slice needs checkpoint_key and [start, stop) rows matching the shape')
         if 'checkpoint_dtype' in value and (kind not in ('parameter','buffer') or value['checkpoint_dtype'] not in ('float32','float16','bfloat16')
                 or value['dtype'].removeprefix('torch.') not in ('float32','float16','bfloat16')):
             fail('checkpoint_dtype casts only external floating tensors')
@@ -274,7 +280,9 @@ def _archive_plan(archive):
     manifest=document('manifest.json')
     expected={name:[{'bucket':{'tokenwise':{'input_size':1}},'file':k['member']}] for name,k in plan['kernels'].items()}
     members=[info.filename for info in archive.infolist()]
-    if len(members)!=len(set(members)) or set(members)!={'manifest.json',PRODUCER_MEMBER}|{k['member'] for k in plan['kernels'].values()}:
+    package=((plan['source_metadata'].get('checkpoint') or {}).get('package_tensors') or {}).get('member')
+    allowed={'manifest.json',PRODUCER_MEMBER}|{k['member'] for k in plan['kernels'].values()}|({package} if isinstance(package,str) else set())
+    if len(members)!=len(set(members)) or set(members)!=allowed:
         raise ExecutionPlanError('Archive membership differs from execution plan')
     if (not isinstance(manifest,dict) or manifest.get('format_version')!=2
             or manifest.get('model')!={'architecture':plan['source_metadata']['architecture'],'fxbx_execution_fingerprint':digest}
@@ -282,6 +290,21 @@ def _archive_plan(archive):
             or manifest.get('versions')!={'furiosa_compiler':plan['compiler_identity']} or manifest.get('kernels')!=expected):
         raise ExecutionPlanError('Native manifest differs from execution plan')
     return plan
+
+
+def _package_tensors(path,source,targets):
+    """Derived buffers (rotary frequencies, ids) that a package ships beside its original-checkpoint binding."""
+    if not targets:return {}
+    record=source.get('package_tensors') or {}
+    if set(record.get('targets') or [])!=targets or not isinstance(record.get('member'),str):
+        raise ExecutionPlanError('Package tensors do not match the plan')
+    from safetensors.torch import load
+    with zipfile.ZipFile(path) as archive:
+        raw=archive.read(record['member'])
+    if hashlib.sha256(raw).hexdigest()!=record.get('sha256'):raise ExecutionPlanError('Package tensors changed')
+    values=load(raw)
+    if set(values)!=targets:raise ExecutionPlanError('Package tensors do not match the plan')
+    return values
 
 
 def _from_checkpoint(value,spec,torch):
@@ -316,8 +339,11 @@ class ExecutionFXB:
         if weights is None and isinstance(self.plan['source_metadata'].get('checkpoint'),dict):
             # Like furiosa-llm .fxb: the package names the original HF checkpoint and holds no weight copy.
             from .hub import original_checkpoint
-            targets={s['target'] for s in self.plan['tensors'].values() if s['kind'] in ('parameter','buffer')}
-            weights=SafeTensorWeights(original_checkpoint(self.plan['source_metadata']['checkpoint']),names={t:t for t in targets})
+            source=self.plan['source_metadata']['checkpoint']
+            external=[s for s in self.plan['tensors'].values() if s['kind'] in ('parameter','buffer')]
+            names={s['target']:s.get('checkpoint_key',s['target']) for s in external if not s.get('package_tensor')}
+            weights=SafeTensorWeights(original_checkpoint(source),names=names,
+                                      extra=_package_tensors(self.path,source,{s['target'] for s in external if s.get('package_tensor')}))
         self.weights=weights if isinstance(weights,SafeTensorWeights) else dict(weights or {})
         self.device=device;self.programs={};self.resident={};self.states={};self.stack=None;self.failed=False
         self.memory=_memory_gate(self.plan)

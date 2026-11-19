@@ -70,7 +70,8 @@ def original_checkpoint(source, *, download=None):
     import re
     repo,revision,files=source.get('repo',''),source.get('revision',''),source.get('files') or {}
     if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo) or not re.fullmatch('[0-9a-f]{40}',revision) or not files
-            or any(not re.fullmatch(r'[A-Za-z0-9_.-]+\.safetensors(\.index\.json)?',f) or not re.fullmatch('[0-9a-f]{64}',h)
+            or any(not re.fullmatch(r'([A-Za-z0-9_-][A-Za-z0-9_.-]*/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.safetensors(\.index\.json)?',f)
+                   or '..' in f.split('/') or not re.fullmatch('[0-9a-f]{64}',h)
                    for f,h in files.items())):
         raise ValueError('Invalid original checkpoint reference')
     if download is None:
