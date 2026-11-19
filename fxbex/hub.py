@@ -44,75 +44,51 @@ def _fetch_merged(download, repo, member, revision, target, refresh):
 
 
 def _fetch_companions(download, repo, member, revision, target, refresh):
-    """Optional files stored beside the package at the same pinned commit.
+    """Optional sample input stored beside the package at the same pinned commit.
 
     MEMBER.sample.safetensors -> TARGET.sample.safetensors (`fxbx run --sample` input).
-    MEMBER.weights.json -> TARGET.weights.json, a recipe that names the original checkpoint;
-    ensure_weights() builds TARGET.weights/ from it. No weight bytes are republished.
+    Weights are never republished: the plan names the original checkpoint (original_checkpoint).
     """
-    for suffix in ('.sample.safetensors','.weights.json'):
-        local=target.with_name(target.name+suffix)
-        if local.is_file() and not refresh:continue
-        try:path=download(repo,member+suffix,revision=revision,force_download=refresh)
-        except Exception:continue  # this release does not ship it
-        fd,temp=tempfile.mkstemp(prefix='.companion-',dir=target.parent);os.close(fd)
-        try:shutil.copyfile(path,temp);os.replace(temp,local)
-        finally:
-            if os.path.exists(temp):os.unlink(temp)
-        print('Saved: '+str(local),file=sys.stderr,flush=True)
+    local=target.with_name(target.name+'.sample.safetensors')
+    if local.is_file() and not refresh:return
+    try:path=download(repo,member+'.sample.safetensors',revision=revision,force_download=refresh)
+    except Exception:return  # this release does not ship a sample
+    fd,temp=tempfile.mkstemp(prefix='.sample-',dir=target.parent);os.close(fd)
+    try:shutil.copyfile(path,temp);os.replace(temp,local)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
+    print('Sample saved: '+str(local),file=sys.stderr,flush=True)
 
 
-_DTYPES=('bfloat16','float16','float32')
+def original_checkpoint(source, *, download=None):
+    """Download the original HF checkpoint a plan names and verify every file's SHA-256.
 
-
-def ensure_weights(package, *, download=None):
-    """Build PACKAGE.weights/ from the original checkpoint named in PACKAGE.weights.json.
-
-    The recipe pins the source repo, commit and file SHA-256; keys are renamed by ordered
-    regex rules and cast to one dtype. Runs once; the converted directory is reused.
+    source = plan['source_metadata']['checkpoint'] = {'repo', 'revision' (40-hex commit),
+    'files': {name: sha256}}. Files land in the normal Hugging Face cache, as for .fxb models.
+    Returns the single safetensors file, or the snapshot folder for an indexed sharded checkpoint.
     """
-    package=Path(package);recipe_path=package.with_name(package.name+'.weights.json')
-    weights=package.with_name(package.name+'.weights')
-    if weights.exists() or not recipe_path.is_file():return None
     import re
-    recipe=json.loads(recipe_path.read_text())
-    source=recipe.get('source') or {}
     repo,revision,files=source.get('repo',''),source.get('revision',''),source.get('files') or {}
-    if (recipe.get('schema')!='fxbx.weights-recipe.v1' or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo)
-            or not re.fullmatch('[0-9a-f]{40}',revision) or not files
-            or any(not re.fullmatch(r'[A-Za-z0-9_.-]+\.safetensors',f) or not re.fullmatch('[0-9a-f]{64}',h) for f,h in files.items())
-            or recipe.get('dtype') not in (None,*_DTYPES)):
-        raise ValueError('Invalid weights recipe: '+str(recipe_path))
-    rules=[(re.compile(a),b) for a,b in recipe.get('rename',[])]
-    try:
-        import torch
-        from safetensors.torch import load_file,save_file
-    except ImportError:
-        print('Weights are converted from '+repo+' on first run in the SDK Python (needs torch and safetensors).',file=sys.stderr,flush=True)
-        return None
+    if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo) or not re.fullmatch('[0-9a-f]{40}',revision) or not files
+            or any(not re.fullmatch(r'[A-Za-z0-9_.-]+\.safetensors(\.index\.json)?',f) or not re.fullmatch('[0-9a-f]{64}',h)
+                   for f,h in files.items())):
+        raise ValueError('Invalid original checkpoint reference')
     if download is None:
         try:from huggingface_hub import hf_hub_download as download
         except ImportError:raise RuntimeError('Install download support: pip install huggingface_hub') from None
-    print(f'Downloading original weights: {repo}@{revision[:8]}',file=sys.stderr,flush=True)
-    dtype=getattr(torch,recipe['dtype']) if recipe.get('dtype') else None
-    converted={}
+    print(f'Original weights: {repo}@{revision[:8]}',file=sys.stderr,flush=True)
+    paths={}
     for name,expected in sorted(files.items()):
-        path=Path(download(repo,name,revision=revision))
-        h=hashlib.sha256()
+        path=Path(download(repo,name,revision=revision));h=hashlib.sha256()
         with path.open('rb') as stream:
             for block in iter(lambda:stream.read(1024*1024),b''):h.update(block)
-        if h.hexdigest()!=expected:raise ValueError('Original weights checksum mismatch: '+name)
-        for key,tensor in load_file(str(path)).items():
-            for pattern,replacement in rules:key=pattern.sub(replacement,key)
-            if key in converted:raise ValueError('Weights recipe maps two tensors to '+key)
-            converted[key]=tensor.to(dtype).contiguous() if dtype is not None else tensor
-    staged=Path(tempfile.mkdtemp(prefix='.weights-',dir=package.parent))
-    try:
-        save_file(converted,str(staged/recipe.get('output','model.safetensors')))
-        os.replace(staged,weights)
-    finally:shutil.rmtree(staged,ignore_errors=True)
-    print('Weights converted: '+str(weights),file=sys.stderr,flush=True)
-    return weights
+        if h.hexdigest()!=expected:raise ValueError('Original checkpoint checksum mismatch: '+name)
+        paths[name]=path
+    shards=[n for n in paths if n.endswith('.safetensors')]
+    if len(shards)==1:return paths[shards[0]]
+    index=[n for n in paths if n.endswith('.index.json')]
+    if len(index)!=1:raise ValueError('Sharded original checkpoint needs its index file')
+    return paths[index[0]].parent
 
 
 def catalog_matches(catalog,name,version=None):

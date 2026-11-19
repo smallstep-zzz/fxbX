@@ -181,9 +181,8 @@ Run precompiled packages from a file or the model catalog.""")
         print(json.dumps({'cache':str(root),'files':[str(p) for p in files],'cleared':args.operation=='clear'}))
         return 0
     if args.action=='fetch':
-        from .hub import ensure_weights, resolve_package
-        package=resolve_package(args.package,refresh=args.refresh);ensure_weights(package)
-        print(json.dumps({'package':str(package)}))
+        from .hub import resolve_package
+        print(json.dumps({'package':str(resolve_package(args.package,refresh=args.refresh))}))
         return 0
     if args.action in ('run','chat','predict','serve','doctor') or (args.action=='validate' and not args.integrity_only):
         from .settings import runtime_python
@@ -198,9 +197,8 @@ Run precompiled packages from a file or the model catalog.""")
               '\n모델을 준비하고 있습니다. 적재가 완료되면 >>> 뒤에 질문을 입력하세요.'+
               '\n/reset: 대화 초기화 · /quit: 종료 및 모델 해제\n',file=sys.stderr,flush=True)
     if args.action in ('run','chat','predict','serve','describe','sample','inspect','validate'):
-        from .hub import ensure_weights, resolve_package
+        from .hub import resolve_package
         args.package=str(resolve_package(args.package))
-        ensure_weights(args.package)
     if args.action == 'run' and args.sample and not args.input and not args.image:
         if _native_graph_package(args.package):
             return _run_native_graph_sample(args.package, args.output)
