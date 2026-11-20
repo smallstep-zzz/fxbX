@@ -1,5 +1,5 @@
 """Model package download and execution runtime."""
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 
 from .llm import LLM
 from .model import Model, YOLO, ObjectDetection, ImageGeneration

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 
+TORCH_FILES = ('.ckpt', '.pt', '.pth', '.bin')
 _DTYPES = {'BOOL': 'bool', 'U8': 'uint8', 'I8': 'int8', 'I16': 'int16',
            'I32': 'int32', 'I64': 'int64', 'F16': 'float16', 'BF16': 'bfloat16',
            'F32': 'float32', 'F64': 'float64', 'F8_E4M3': 'float8_e4m3fn',
@@ -15,7 +16,7 @@ _DTYPES = {'BOOL': 'bool', 'U8': 'uint8', 'I8': 'int8', 'I16': 'int16',
 
 
 class SafeTensorWeights(Mapping):
-    """Local safetensors or sharded checkpoint, with optional explicit target names.
+    """Local safetensors or sharded checkpoint, or one PyTorch file, with optional explicit target names.
 
     ``names`` maps execution-plan targets to checkpoint tensor names. Supplying it
     explicitly selects a subset; otherwise every checkpoint tensor must be bound.
@@ -28,6 +29,10 @@ class SafeTensorWeights(Mapping):
         from safetensors import safe_open
         path = Path(path).absolute()
         indexed = None
+        self._torch = None
+        if path.is_file() and path.suffix in TORCH_FILES:
+            self._init_torch(path, names, extra)
+            return
         if path.is_file():
             files = [path]
         else:
@@ -61,6 +66,32 @@ class SafeTensorWeights(Mapping):
             self._identities[file] = before
         if indexed is not None and (set(indexed) != set(self._files) or any(self._files[k] != path / v for k, v in indexed.items())):
             raise ValueError('checkpoint headers disagree with weight_map')
+        self.names = dict(names) if names is not None else {n: n for n in self._files}
+        if (not self.names or any(not isinstance(k, str) or not k or not isinstance(v, str) or v not in self._files
+                                  for k, v in self.names.items())):
+            raise ValueError('explicit target mapping names an unknown checkpoint tensor')
+        self.loaded_tensors = 0
+        self._casts = {}; self._slices = {}
+        self.extra = dict(extra or {})
+
+    def _init_torch(self, path, names, extra):
+        """One PyTorch checkpoint, read with weights_only=True (no code execution), memory-mapped."""
+        import torch
+        before = self._identity(path)
+        try:
+            state = torch.load(str(path), map_location='cpu', weights_only=True, mmap=True)
+        except RuntimeError:  # legacy (non-zip) serialization cannot be memory-mapped
+            state = torch.load(str(path), map_location='cpu', weights_only=True)
+        if isinstance(state, dict) and isinstance(state.get('state_dict'), dict):
+            state = state['state_dict']
+        if not isinstance(state, dict) or not state or not all(isinstance(k, str) and isinstance(v, torch.Tensor)
+                                                                for k, v in state.items()):
+            raise ValueError('PyTorch checkpoint must hold a flat {name: tensor} state dict')
+        if self._identity(path) != before:
+            raise ValueError('checkpoint changed during metadata admission')
+        self._torch = state
+        self._specs = {k: {'shape': list(v.shape), 'dtype': str(v.dtype).removeprefix('torch.')} for k, v in state.items()}
+        self._files = {k: path for k in state}; self._identities = {path: before}
         self.names = dict(names) if names is not None else {n: n for n in self._files}
         if (not self.names or any(not isinstance(k, str) or not k or not isinstance(v, str) or v not in self._files
                                   for k, v in self.names.items())):
@@ -115,8 +146,11 @@ class SafeTensorWeights(Mapping):
         name = self.names[target]; file = self._files[name]
         if self._identity(file) != self._identities[file]:
             raise ValueError('checkpoint changed after metadata admission')
-        with safe_open(str(file), framework='pt', device='cpu') as reader:
-            tensor = reader.get_tensor(name)
+        if self._torch is not None:
+            tensor = self._torch[name].clone()  # a private copy, not a view of the mapped file
+        else:
+            with safe_open(str(file), framework='pt', device='cpu') as reader:
+                tensor = reader.get_tensor(name)
         self.loaded_tensors += 1
         if target in self._slices:
             start, stop = self._slices[target]
