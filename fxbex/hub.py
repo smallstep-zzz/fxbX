@@ -60,20 +60,26 @@ def _fetch_companions(download, repo, member, revision, target, refresh):
     print('Sample saved: '+str(local),file=sys.stderr,flush=True)
 
 
+TORCH_FILES=('.ckpt','.pt','.pth','.bin')
+
+
 def original_checkpoint(source, *, download=None):
     """Download the original HF checkpoint a plan names and verify every file's SHA-256.
 
     source = plan['source_metadata']['checkpoint'] = {'repo', 'revision' (40-hex commit),
     'files': {name: sha256}}. Files land in the normal Hugging Face cache, as for .fxb models.
-    Returns the single safetensors file, or the snapshot folder for an indexed sharded checkpoint.
+    Returns the single safetensors or PyTorch (.ckpt/.pt/.pth/.bin) file, or the snapshot folder
+    for an indexed sharded checkpoint.
     """
     import re
     repo,revision,files=source.get('repo',''),source.get('revision',''),source.get('files') or {}
     if (not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo) or not re.fullmatch('[0-9a-f]{40}',revision) or not files
-            or any(not re.fullmatch(r'([A-Za-z0-9_-][A-Za-z0-9_.-]*/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*\.safetensors(\.index\.json)?',f)
+            or any(not re.fullmatch(r'([A-Za-z0-9_-][A-Za-z0-9_.-]*/)?[A-Za-z0-9_-][A-Za-z0-9_.-]*(\.safetensors(\.index\.json)?|\.ckpt|\.pt|\.pth|\.bin)',f)
                    or '..' in f.split('/') or not re.fullmatch('[0-9a-f]{64}',h)
                    for f,h in files.items())):
         raise ValueError('Invalid original checkpoint reference')
+    if any(f.endswith(TORCH_FILES) for f in files) and len(files)!=1:
+        raise ValueError('A PyTorch original checkpoint must be exactly one file')
     if download is None:
         try:from huggingface_hub import hf_hub_download as download
         except ImportError:raise RuntimeError('Install download support: pip install huggingface_hub') from None
@@ -85,6 +91,7 @@ def original_checkpoint(source, *, download=None):
             for block in iter(lambda:stream.read(1024*1024),b''):h.update(block)
         if h.hexdigest()!=expected:raise ValueError('Original checkpoint checksum mismatch: '+name)
         paths[name]=path
+    if any(n.endswith(TORCH_FILES) for n in paths):return next(iter(paths.values()))
     shards=[n for n in paths if n.endswith('.safetensors')]
     if len(shards)==1:return paths[shards[0]]
     index=[n for n in paths if n.endswith('.index.json')]

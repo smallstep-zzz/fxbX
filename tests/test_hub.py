@@ -170,6 +170,34 @@ class OriginalCheckpoint(unittest.TestCase):
    bad=dict(source,files={'model.safetensors':'0'*64})
    with self.assertRaisesRegex(ValueError,'checksum'):original_checkpoint(bad,download=download)
 
+ def test_a_single_pytorch_original_is_verified_and_read_safely(self):
+  import torch
+  from fxbex.hub import original_checkpoint
+  from fxbex.checkpoint import SafeTensorWeights
+  with tempfile.TemporaryDirectory() as d:
+   original=Path(d)/'model.ckpt'
+   torch.save({'enc.query.weight':torch.ones(2,2),'unused':torch.zeros(1)},original)
+   source={'repo':'org/orig','revision':'b'*40,'files':{'model.ckpt':hashlib.sha256(original.read_bytes()).hexdigest()}}
+   path=original_checkpoint(source,download=lambda repo,file,revision,**k:str(original))
+   self.assertEqual(path,original)
+   weights=SafeTensorWeights(path,names={'enc.query.weight':'enc.query.weight'})
+   weights.validate({'enc.query.weight':{'shape':[2,2],'stride':[2,1],'dtype':'bfloat16','checkpoint_dtype':'float32'}})
+   value=weights['enc.query.weight']
+   self.assertEqual((value.dtype,weights.loaded_tensors),(torch.bfloat16,1))
+   self.assertTrue(torch.equal(value,torch.ones(2,2,dtype=torch.bfloat16)))
+   two=dict(source,files={'model.ckpt':source['files']['model.ckpt'],'model.safetensors':'0'*64})
+   with self.assertRaisesRegex(ValueError,'exactly one file'):
+    original_checkpoint(two,download=lambda repo,file,revision,**k:str(original if file=='model.ckpt' else Path(d)/'x'))
+
+ def test_a_pytorch_original_must_hold_only_tensors(self):
+  import torch
+  from fxbex.checkpoint import SafeTensorWeights
+  with tempfile.TemporaryDirectory() as d:
+   torch.save({'state_dict':{'w':torch.ones(2)},'epoch':3},Path(d)/'nested.pt')
+   self.assertEqual(list(SafeTensorWeights(Path(d)/'nested.pt')),['w'])
+   torch.save({'w':torch.ones(2),'step':3},Path(d)/'mixed.pt')
+   with self.assertRaisesRegex(ValueError,'flat'):SafeTensorWeights(Path(d)/'mixed.pt')
+
  def test_row_slices_and_package_tensors_bind_with_the_original(self):
   import torch
   from safetensors.torch import save_file
