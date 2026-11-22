@@ -522,6 +522,13 @@ class ExecutionFXB:
         for position,step in enumerate(steps):
             if all(n in const for n in step['inputs']):const.update(step['outputs']);folded.add(position)
         merged,covered=[],set()
+        # Repeated blocks compile to identical Runnables (weights are inputs): deserialize and upload
+        # each distinct member once. The last reader of every tensor is precomputed so the dataflow
+        # check stays linear in the plan length.
+        loaded,last={},{}
+        for position,step in enumerate(steps):
+            for n in step['inputs']:last[n]=position
+        final=set(recipe['outputs'])
         for group in groups:
             span=group.get('steps')
             # Consecutive among live steps: load-time folded steps may sit between them.
@@ -532,11 +539,14 @@ class ExecutionFXB:
             for p in span:
                 inputs+=[n for n in steps[p]['inputs'] if n not in produced and n not in inputs]
                 produced.update(steps[p]['outputs'])
-            later={n for s in steps[span[-1]+1:] for n in s['inputs']}|set(recipe['outputs'])
-            if group['inputs']!=inputs or set(group['outputs'])!=produced&later:return {},set(),'group differs from plan dataflow'
-            raw=(root/group['member']).read_bytes()
-            if hashlib.sha256(raw).hexdigest()!=group['sha256']:return {},set(),'member hash changed'
-            program=self.sdk.Runnable(self.sdk.ir.Runnable.deserialize(raw)).to(self.device);inner=program._inner
+            later={n for n in produced if last.get(n,-1)>span[-1] or n in final}
+            if group['inputs']!=inputs or set(group['outputs'])!=later:return {},set(),'group differs from plan dataflow'
+            key=(group['member'],group['sha256'])
+            if key not in loaded:
+                raw=(root/group['member']).read_bytes()
+                if hashlib.sha256(raw).hexdigest()!=group['sha256']:return {},set(),'member hash changed'
+                loaded[key]=self.sdk.Runnable(self.sdk.ir.Runnable.deserialize(raw)).to(self.device)
+            program=loaded[key];inner=program._inner
             if (inner.expected_num_fusion!=8
                     or [list(s.host_sizes) for s in inner.input_dram_shapes]!=[specs[n]['shape'] for n in group['inputs']]
                     or [list(s.host_sizes) for s in inner.output_dram_shapes]!=[specs[n]['shape'] for n in group['outputs']]):
