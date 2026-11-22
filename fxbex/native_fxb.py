@@ -127,6 +127,23 @@ def validate_native(path, *, verify_official=True):
                 extra = (extra.get('package_tensors') or {}).get('member') if isinstance(extra, dict) else None
                 if isinstance(extra, str) and extra.startswith('checkpoint/') and extra.endswith('.safetensors'):
                     expected.add(_name(extra))
+            # Embedded merged runnables (merged/*) may stand in for EDFs that only their groups use;
+            # the execution layer re-derives that those kernels are really unnecessary.
+            merged = {name for name in members if name.startswith('merged/')}
+            if merged:
+                from .merged import MERGED_MANIFEST, MergedError, embedded_manifest
+                if MERGED_MANIFEST not in merged:
+                    raise NativeFXBError('Embedded merged runnables need merged/manifest.json')
+                try:
+                    pruned = set(embedded_manifest(archive).get('pruned_kernels', []))
+                except MergedError as exc:
+                    raise NativeFXBError(str(exc)) from exc
+                unknown = pruned - set(manifest['kernels'])
+                if unknown:
+                    raise NativeFXBError('pruned_kernels names kernels the native manifest does not list')
+                omitted = {_name(e['file']) for name in pruned for e in manifest['kernels'][name]}
+                files = files - omitted
+                expected = (expected - omitted) | merged
             if set(members) != expected:
                 raise NativeFXBError('Native archive members do not match manifest EDF references and producer metadata')
             if any(members[name].file_size == 0 for name in files):
