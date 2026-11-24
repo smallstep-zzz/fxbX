@@ -41,7 +41,8 @@ class PackageService:
         self.log_path=run/'worker.log';self.log=self.log_path.open('w')
         env=dict(os.environ,OMP_NUM_THREADS='8',MKL_NUM_THREADS='8')
         worker_python=runtime_python()
-        self.process=subprocess.Popen([worker_python,'-u','-m','fxbex.worker',self.package],env=env,
+        from .sdk_runner import worker_command
+        self.process=subprocess.Popen(worker_command(worker_python,'fxbex.worker',self.package),env=env,
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
 
     def _request(self,request,on_progress=None,on_token=None):

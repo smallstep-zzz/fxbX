@@ -30,7 +30,8 @@ class RuntimeCLI(unittest.TestCase):
         args=['run','Model','--max-new-tokens','8']
         with patch('fxbex.settings.runtime_python',return_value='/sdk/python'),patch('subprocess.call',return_value=0) as call,patch('fxbex.hub.resolve_package') as resolve:
             self.assertEqual(main(args),0)
-        call.assert_called_once_with(['/sdk/python','-m','fxbx',*args])
+        from fxbex.sdk_runner import worker_command
+        call.assert_called_once_with(worker_command('/sdk/python','fxbx',*args))
         resolve.assert_not_called()
 
     def test_version_does_not_need_sdk_or_catalog(self):
