@@ -139,6 +139,16 @@ class SafeTensorWeights(Mapping):
             if self._identity(file) != identity:
                 raise ValueError('checkpoint changed after metadata admission')
 
+    def staging_bytes(self, target, spec):
+        """Conservative source + cast/slice footprint, before reading tensor data."""
+        from .memory import tensor_bytes
+        source=self.extra.get(target)
+        stored=(source.numel()*source.element_size() if source is not None
+                else tensor_bytes(self._specs[self.names[target]]))
+        result=tensor_bytes(spec)
+        if stored is None or result is None:raise ValueError('Unknown checkpoint staging size')
+        return stored+result
+
     def __getitem__(self, target):
         from safetensors import safe_open
         if target in self.extra:

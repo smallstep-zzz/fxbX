@@ -342,9 +342,11 @@ class ExecutionFXB:
     """Exclusive fixed-shape tensor-plan session; state and temporaries stay on NPU."""
     supports_zero_input_kernels=True
     supports_frozen_buffer_guards=True
-    def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1):
+    def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
+        if type(load_buffers) is not int or load_buffers not in (1,2):raise ExecutionPlanError('load_buffers must be 1 or 2')
+        if type(load_buffer_bytes) is not int or load_buffer_bytes<1:raise ExecutionPlanError('load_buffer_bytes must be positive')
         from .checkpoint import SafeTensorWeights
         self.path=Path(path);self.plan=read_execution_plan(path)
         if weights is None and isinstance(self.plan['source_metadata'].get('checkpoint'),dict):
@@ -356,6 +358,7 @@ class ExecutionFXB:
             weights=SafeTensorWeights(original_checkpoint(source),names=names,
                                       extra=_package_tensors(self.path,source,{s['target'] for s in external if s.get('package_tensor')}))
         self.weights=weights if isinstance(weights,SafeTensorWeights) else dict(weights or {})
+        self.load_buffers=load_buffers;self.load_buffer_bytes=load_buffer_bytes;self.load_stats={};self._weight_transfers=None
         self.device=device;self.pruned=set();self.programs={};self.resident={};self.states={};self.stack=None;self.failed=False
         self.memory=_memory_gate(self.plan)
         self._memory_modes={'cpu':self.memory}
@@ -444,18 +447,35 @@ class ExecutionFXB:
         self.stack.enter_context(npu_lock());set_cpu_fallback(False)
         if get_cpu_fallback():raise ExecutionPlanError('CPU fallback could not be disabled')
         for name,program in runnables.items():self.programs[name]=sdk.Runnable(program).to(self.device)
+        from .load_pipeline import WeightTransfers
+        from .memory import tensor_bytes
+        def record():
+            event=sdk.Event(torch.device(self.device));event.record(sdk.current_stream(torch.device(self.device)));return event
+        event_record=record if callable(getattr(sdk,'Event',None)) else None
+        if self.load_buffers==2 and event_record is not None:
+            try:record().synchronize()
+            except (TypeError,NotImplementedError):event_record=None
+        window=WeightTransfers(upload=lambda value,spec,async_copy:self._upload(value.detach(),spec,non_blocking=async_copy),
+                               synchronize=self._sync,record=event_record,
+                               slots=self.load_buffers,max_bytes=self.load_buffer_bytes)
+        self._weight_transfers=window
         uploaded={}
-        for name,spec in self.plan['tensors'].items():
-            if spec['kind'] in ('parameter','buffer'):
+        with window:
+            for name,spec in self.plan['tensors'].items():
+                if spec['kind'] not in ('parameter','buffer'):continue
                 target=spec['target']
-                if target not in uploaded:
+                if target in uploaded:
+                    self.resident[name]=self.resident[uploaded[target]];continue
+                def read(target=target,spec=spec):
                     value=_from_checkpoint(self.weights[target],spec,torch)
                     if not _tensor_matches(value,spec,torch) or value.requires_grad:
                         raise ExecutionPlanError('External tensor changed after admission: '+target)
-                    self.resident[name]=self._upload(value.detach(),spec);uploaded[target]=name
-                    if streaming:self._sync()
-                    del value
-                else:self.resident[name]=self.resident[uploaded[target]]
+                    return value
+                size=self.weights.staging_bytes(target,spec) if streaming else tensor_bytes(spec)
+                self.resident[name]=window.transfer(read,spec,size)
+                uploaded[target]=name
+        self.load_stats=dict(window.stats)
+        self._weight_transfers=None
         self._sync();self.states={};self._default_ready=False;self.failed=False
         self._build_sequences()
     def replace_parameters(self, values, *, max_bytes=2*1024**3):
@@ -635,8 +655,8 @@ class ExecutionFXB:
         finally:
             archive.close()
     def _sync(self):self.sdk.current_stream(self.torch.device(self.device)).synchronize()
-    def _upload(self,value,spec):
-        result=value.to(self.device)
+    def _upload(self,value,spec,*,non_blocking=False):
+        result=value.to(self.device,non_blocking=non_blocking)
         if not _tensor_matches(result,spec,self.torch) or result.device.type!='furiosa':
             raise ExecutionPlanError('Tensor upload did not preserve its NPU contract')
         return result
@@ -768,7 +788,9 @@ class ExecutionFXB:
     def close(self):
         with self._lock:
             try:
-                if self.programs:self._sync()
+                if self.programs or self._weight_transfers is not None:self._sync()
+                if self._weight_transfers is not None:
+                    self._weight_transfers.pending.clear();self._weight_transfers.current=None;self._weight_transfers=None
             finally:
                 for state in self._requests:state._tensors.clear();state._closed=True
                 self._requests.clear()

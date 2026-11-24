@@ -62,3 +62,12 @@ class CheckpointTests(unittest.TestCase):
         (self.root / 'model.safetensors.index.json').write_text(json.dumps({'weight_map': {'w': '../a.safetensors'}}))
         with self.assertRaisesRegex(ValueError, 'relative'):
             SafeTensorWeights(self.root)
+
+    def test_staging_budget_includes_full_source_and_cast_slice_without_reads(self):
+        p=self.root/'weights.safetensors'
+        save_file({'w':np.ones((2,3),dtype=np.float32)},str(p))
+        values=SafeTensorWeights(p)
+        wanted={**spec([1,3],'bfloat16'),'checkpoint_dtype':'float32','checkpoint_slice':[0,1]}
+        values.validate({'w':wanted})
+        self.assertEqual(values.staging_bytes('w',wanted),24+6)
+        self.assertEqual(values.loaded_tensors,0)
