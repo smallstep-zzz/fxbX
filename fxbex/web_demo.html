@@ -165,7 +165,7 @@ function field(key,value,container=fields) {
   return ()=>structured?JSON.parse(input.value):input.type==='number'?input.valueAsNumber:input.value;
 }
 function showExample(sample) {
-  if(sample===undefined) sample=config.method==='predict'?{...config.example,loras:[]}:config.example;
+  if(sample===undefined) sample=config.method==='predict' && config.lora?.supported?{...config.example,loras:[]}:config.example;
   if(config.method==='predict' && config.lora?.supported) {
     const choices=sample.loras ?? [];
     if(!Array.isArray(choices) || choices.length>config.lora.max_active ||
