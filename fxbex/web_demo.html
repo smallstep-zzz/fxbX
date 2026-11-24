@@ -16,7 +16,7 @@ input:not([type=checkbox]):not([type=range]):not([type=file]),textarea{display:b
 input[readonly]{color:#888!important;background:#121212!important}textarea{resize:vertical;min-height:132px;line-height:1.6}textarea.json{min-height:200px;font:12px/1.6 ui-monospace,monospace}input::placeholder,textarea::placeholder{color:#888}
 button,.download{border:1px solid #dc2915;border-radius:3px;background:#dc2915;color:#fff;padding:10px 14px;cursor:pointer;line-height:1.35;font-weight:550;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:10px}
 button:hover{background:#c62312;border-color:#c62312}button.secondary{background:transparent;border-color:#414141;color:#ddd}button.secondary:hover{background:#252525;border-color:#666}.quiet{border:0;background:none;color:#aaa;padding:0;font-size:12px}.quiet:hover{background:none;color:#fff;border:0}.quiet:disabled,button:disabled{opacity:.45;cursor:default}
-fieldset{border:0;padding:0;margin:0 0 22px;min-width:0}.lora-toolbar{display:flex;align-items:center;justify-content:space-between;margin:8px 0 12px;gap:8px}.lora-toolbar h3{font-size:13px;margin:0}.count{font:11px ui-monospace,monospace;color:#888;margin-left:8px}.hint{font-size:12px;color:var(--muted);margin:8px 0 12px}.search{margin-bottom:12px;font-size:12px!important;padding:9px 11px!important}
+fieldset{border:0;padding:0;margin:0 0 22px;min-width:0}#lora-selection{float:right;font-size:11px;color:#999;font-weight:400}.lora-toolbar{display:flex;align-items:center;justify-content:space-between;margin:8px 0 12px;gap:8px}.lora-toolbar h3{font-size:13px;margin:0}.count{font:11px ui-monospace,monospace;color:#888;margin-left:8px}.hint{font-size:12px;color:var(--muted);margin:8px 0 12px}.search{margin-bottom:12px;font-size:12px!important;padding:9px 11px!important}
 .hub-search{display:flex;gap:8px}.hub-search input{min-width:0;flex:1}.hub-result{padding:12px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.hub-result select{margin:8px 0}.hub-result p{font-size:11px;color:#aaa}#hub{margin-bottom:18px}
 .lora-card{border:1px solid #363636;border-radius:3px;background:#101010;margin-top:10px;padding:14px;transition:border-color .15s,background .15s}.lora-card.selected{border-color:var(--red);background:#1b1210}.lora-title{overflow-wrap:anywhere;display:flex;align-items:center;gap:10px;font-size:13px;margin:0;cursor:pointer}.lora-title input{width:16px;height:16px;accent-color:var(--red);margin:0;flex-shrink:0}.lora-description{font-size:12px;color:#999;margin:8px 0 0;line-height:1.6}.lora-source{color:#aaa;font-size:11px;text-decoration:none}.lora-source:hover{color:#fff;text-decoration:underline}.lora-settings{margin-top:14px;border-top:1px solid #3c2b26;padding-top:12px}.scale-row{display:grid;grid-template-columns:1fr 74px;gap:16px;align-items:center}.scale-row input[type=range]{width:100%;accent-color:var(--red)}.scale-row input[type=number]{padding:6px 8px!important;font-size:12px}.lora-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}.lora-actions button{font-size:11px;padding:7px 10px}.trigger{display:inline-flex;gap:6px;align-items:center;font-size:11px;color:#aaa;margin-top:10px}.trigger button{background:#252525;border-color:#3e3e3e;color:#eee;font:11px ui-monospace,monospace;padding:3px 7px}
 .settings{margin:0 0 20px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}summary{cursor:pointer;padding:13px 0;font-size:12px;color:#bbb}.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}.settings-grid .field{margin-bottom:14px}.settings-grid label{font-size:11px}.settings-grid input{font-size:13px}.json-input{margin-top:16px}#sample-file{font-size:12px;color:#aaa;max-width:100%;padding-bottom:12px}#sample-file::file-selector-button{background:#242424;border:1px solid #414141;border-radius:3px;color:#eee;font:inherit;padding:7px 9px;margin-right:10px;cursor:pointer}
@@ -28,11 +28,11 @@ footer{border-top:1px solid var(--line);display:flex;justify-content:space-betwe
 </style>
 <div class="shell">
 <header class="topbar"><div class="brand">fxb<b>X</b></div><span class="top-label">MODEL PLAYGROUND</span><span class="connection" id="connection">모델 연결 중</span></header>
-<div class="hero"><p class="eyebrow">LOCAL INFERENCE / FURIOSA RNGD</p><h1 id="model">모델 정보 불러오는 중</h1><p class="subhead" id="subhead">프롬프트를 입력하고, LoRA를 골라 결과를 확인하세요.</p></div>
+<div class="hero"><p class="eyebrow">LOCAL INFERENCE / FURIOSA RNGD</p><h1 id="model">모델 정보 불러오는 중</h1><p class="subhead" id="subhead">프롬프트를 입력해 이미지를 생성하세요.</p></div>
 <main>
 <section class="panel"><div class="panel-head"><h2><span class="panel-step">01</span>입력 설정</h2><button id="reset" type="button" class="quiet" disabled>예제 입력으로 초기화</button></div>
 <form id="form"><div id="fields"></div>
-<fieldset id="loras" hidden><div class="lora-toolbar"><h3>LoRA <span id="lora-count" class="count"></span></h3><button id="refresh-loras" class="quiet" type="button">목록 새로고침</button></div><p id="lora-note" class="hint"></p><input id="lora-search" class="search" type="search" aria-label="LoRA 검색" placeholder="이름·스타일·트리거 검색" hidden><details id="hub" hidden><summary>Hugging Face에서 LoRA 가져오기</summary><p class="hint">베이스 모델이 일치하는 후보를 검색합니다. 다운로드 후 모든 가중치가 호환 검사를 통과해야 목록에 추가됩니다. 이미지 품질은 별도로 확인해주세요.</p><div class="hub-search"><input id="hub-query" aria-label="Hugging Face LoRA 검색" placeholder="스타일 검색 또는 owner/model"><button type="button" id="hub-search">검색</button></div><p id="hub-status" class="hint" role="status"></p><div id="hub-results"></div></details><div id="lora-list"></div><p id="lora-empty" class="hint" hidden>검색 조건에 맞는 LoRA가 없습니다.</p></fieldset>
+<fieldset id="loras" hidden><details id="lora-options"><summary>LoRA 추가 옵션 <span id="lora-selection">사용 안 함</span></summary><div class="lora-toolbar"><h3>LoRA <span id="lora-count" class="count"></span></h3><button id="refresh-loras" class="quiet" type="button">목록 새로고침</button></div><p id="lora-note" class="hint"></p><input id="lora-search" class="search" type="search" aria-label="LoRA 검색" placeholder="이름·스타일·트리거 검색" hidden><details id="hub" hidden><summary>Hugging Face에서 LoRA 가져오기</summary><p class="hint">베이스 모델이 일치하는 후보를 검색합니다. 다운로드 후 모든 가중치가 호환 검사를 통과해야 목록에 추가됩니다. 이미지 품질은 별도로 확인해주세요.</p><div class="hub-search"><input id="hub-query" aria-label="Hugging Face LoRA 검색" placeholder="스타일 검색 또는 owner/model"><button type="button" id="hub-search">검색</button></div><p id="hub-status" class="hint" role="status"></p><div id="hub-results"></div></details><div id="lora-list"></div><p id="lora-empty" class="hint" hidden>검색 조건에 맞는 LoRA가 없습니다.</p></details></fieldset>
 <details id="settings" class="settings"><summary>생성 설정 <span id="settings-summary"></span></summary><div id="setting-fields" class="settings-grid"></div><p id="expected" hidden></p></details>
 <button id="run" disabled>실행</button><p id="status" class="status" role="status" aria-live="polite"></p>
 <details class="json-input"><summary>JSON 파일로 입력하기</summary><label for="sample-file" hidden>JSON 입력 파일</label><input id="sample-file" type="file" accept=".json,application/json" disabled></details>
@@ -51,6 +51,8 @@ function status(text, kind='') { $('status').textContent=text; $('status').class
 function isImage() { return Object.values(config.outputs || {}).some(s => s?.type==='image_path'); }
 function promptInput() { return fields.querySelector('[data-key="prompt"]'); }
 function syncLoras() {
+  const count=loraReaders.filter(row=>row.check.checked).length;
+  $('lora-selection').textContent=count?count+'개 선택됨':'사용 안 함';
   for (const row of loraReaders) {
     row.scale.disabled=row.range.disabled=!row.check.checked;
     row.card.classList.toggle('selected',row.check.checked);
@@ -72,9 +74,9 @@ function showLoras() {
   const previous=loraReaders.filter(r=>r.check.checked).map(r=>({id:r.id,scale:r.scale.valueAsNumber}));
   loraReaders.length=0; $('lora-list').replaceChildren();
   const info=config.lora || {supported:false,adapters:[]};
-  $('loras').hidden=false; $('lora-count').textContent=info.adapters.length+'개';
+  $('loras').hidden=!info.supported; $('lora-count').textContent=info.adapters.length+'개';
   $('lora-note').textContent=info.supported && info.adapters.length
-    ? '선택하지 않으면 기본 모델을 사용합니다. 최대 '+info.max_active+'개 선택 · 변경 시 준비 시간이 필요합니다.'
+    ? '기본 모델로 바로 실행할 수 있습니다. 필요할 때만 선택하세요. 최대 '+info.max_active+'개 선택 · 변경 시 준비 시간이 필요합니다.'
     : info.reason || '이 패키지는 LoRA를 지원하지 않습니다.';
   $('lora-search').hidden=!info.adapters.length;
   for(const item of info.adapters) {
@@ -162,7 +164,8 @@ function field(key,value,container=fields) {
   group.append(label,input); container.append(group);
   return ()=>structured?JSON.parse(input.value):input.type==='number'?input.valueAsNumber:input.value;
 }
-function showExample(sample=config.example) {
+function showExample(sample) {
+  if(sample===undefined) sample=config.method==='predict'?{...config.example,loras:[]}:config.example;
   if(config.method==='predict' && config.lora?.supported) {
     const choices=sample.loras ?? [];
     if(!Array.isArray(choices) || choices.length>config.lora.max_active ||
@@ -223,7 +226,7 @@ $('refresh-loras').addEventListener('click',async()=>{
     config.lora=data;showLoras();status('LoRA 목록을 갱신했습니다.');
   } catch(error) {status(error.message,'error');} finally {button.disabled=false;}
 });
-reset.addEventListener('click',()=>{sampleFile.value='';showExample();status('예제 입력으로 초기화했습니다.');});
+reset.addEventListener('click',()=>{sampleFile.value='';showExample();$('lora-options').open=false;status('예제 입력으로 초기화했습니다.');});
 sampleFile.addEventListener('change',async()=>{
   const file=sampleFile.files[0];if(!file) return;
   try {
@@ -261,7 +264,7 @@ form.addEventListener('submit',async event=>{
 });
 fetch('/demo/config',{cache:'no-store'}).then(response=>{if(!response.ok) throw new Error('모델 정보를 불러오지 못했습니다.');return response.json();}).then(data=>{
   config=data;$('hub').hidden=!config.lora_hub;$('model').textContent=config.model;$('connection').textContent='모델 준비됨';
-  $('subhead').textContent=isImage()?'프롬프트를 입력하고, LoRA를 골라 결과를 확인하세요.':'입력을 설정하고, 모델의 응답을 확인하세요.';
+  $('subhead').textContent=isImage()?'프롬프트를 입력해 이미지를 생성하세요.':'입력을 설정하고, 모델의 응답을 확인하세요.';
   if(typeof config.expected_result==='string') {$('expected').textContent=config.expected_result;$('expected').hidden=false;}
   showLoras();showExample();run.textContent=isImage()?'이미지 생성하기':config.method==='chat'?'답변 생성하기':'실행하기';
   run.disabled=reset.disabled=sampleFile.disabled=false;
