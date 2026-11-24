@@ -37,6 +37,11 @@ summary { cursor: pointer; }
     <p id="expected" hidden></p>
     <form>
       <div id="fields"></div>
+      <fieldset id="loras" hidden>
+        <legend>LoRA 선택</legend>
+        <p id="lora-note"></p>
+        <div id="lora-list"></div>
+      </fieldset>
       <button id="run" disabled>실행</button>
       <button id="reset" type="button" class="secondary" disabled>예제 입력</button>
       <label for="sample-file">JSON 입력 파일</label>
@@ -47,6 +52,7 @@ summary { cursor: pointer; }
   <section aria-label="실행 결과">
     <h2>결과</h2>
     <img id="image" alt="모델이 생성한 이미지" hidden>
+    <p id="applied-loras" hidden></p>
     <pre id="answer"></pre>
     <details id="details" hidden><summary>응답 JSON</summary><pre id="result"></pre></details>
   </section>
@@ -58,9 +64,41 @@ const run = $('run');
 const reset = $('reset');
 let config;
 let readInput;
+const loraReaders = [];
 const labels = {prompt: '프롬프트', seed: '시드', state: '상황', context: '문맥',
   question: '질문', questions: '질문', options: '선택지', choices: '선택지', max_new_tokens: '최대 생성 토큰'};
 
+function showLoras() {
+  if (config.method !== 'predict') return;
+  const info = config.lora || {supported: false, adapters: []};
+  $('loras').hidden = false;
+  $('lora-note').textContent = info.supported && info.adapters.length
+    ? '선택하지 않으면 기본 모델을 사용합니다. 최대 ' + info.max_active + '개를 함께 적용할 수 있습니다. 변경 시 준비 시간이 필요할 수 있습니다.'
+    : info.reason || '이 패키지는 LoRA를 지원하지 않습니다.';
+  for (const row of info.adapters) {
+    const line = document.createElement('div');
+    const label = document.createElement('label');
+    const check = document.createElement('input'); check.type = 'checkbox'; check.style.width = 'auto';
+    label.append(check, document.createTextNode(' ' + row.name));
+    const scaleLabel = document.createElement('label'); scaleLabel.textContent = row.name + ' 적용 강도';
+    const scale = document.createElement('input'); scale.type = 'number'; scale.step = 'any';
+    scale.min = row.min_scale; scale.max = row.max_scale; scale.value = row.default_scale;
+    scale.disabled = true; scale.id = 'lora-scale-' + loraReaders.length; scaleLabel.htmlFor = scale.id;
+    check.addEventListener('change', () => { scale.disabled = !check.checked; });
+    const description = document.createElement('p'); description.textContent = row.description;
+    line.append(label, description, scaleLabel, scale); $('lora-list').append(line);
+    loraReaders.push({check,scale,id:row.id,defaultScale:row.default_scale});
+  }
+}
+function selectedLoras() {
+  const selected = loraReaders.filter(row => row.check.checked);
+  if (selected.length > config.lora.max_active) throw new Error('LoRA는 최대 ' + config.lora.max_active + '개까지 선택해주세요.');
+  return selected.map(row => {
+    const scale = row.scale.valueAsNumber;
+    if (!Number.isFinite(scale) || scale < Number(row.scale.min) || scale > Number(row.scale.max)) throw new Error('LoRA 적용 강도를 확인해주세요.');
+    return {id: row.id, scale};
+  });
+}
 function field(key, value) {
   const structured = value === null || typeof value === 'object' || typeof value === 'boolean';
   const input = document.createElement(structured || typeof value === 'string' ? 'textarea' : 'input');
@@ -75,6 +113,15 @@ function field(key, value) {
   return () => structured ? JSON.parse(input.value) : input.type === 'number' ? input.valueAsNumber : input.value;
 }
 function showExample(sample = config.example) {
+  if (config.method === 'predict' && config.lora?.supported) {
+    const choices = Array.isArray(sample.loras) ? sample.loras : [];
+    for (const row of loraReaders) {
+      const chosen = choices.find(item => item.id === row.id);
+      row.check.checked = !!chosen; row.scale.disabled = !chosen;
+      row.scale.value = chosen?.scale ?? row.defaultScale;
+    }
+    sample = {...sample}; delete sample.loras;
+  }
   fields.replaceChildren();
   if (config.method === 'chat' && Array.isArray(sample.messages)
       && sample.messages.length === 1 && sample.messages[0].role === 'user'
@@ -113,18 +160,28 @@ sampleFile.addEventListener('change', async () => {
 document.querySelector('form').addEventListener('submit', async event => {
   event.preventDefault();
   run.disabled = reset.disabled = sampleFile.disabled = true;
+  $('loras').disabled = true;
   $('status').textContent = '실행 중. 첫 요청은 준비 시간이 길 수 있습니다.';
   $('answer').textContent = '';
   $('details').hidden = true;
   $('image').hidden = true;
+  $('applied-loras').hidden = true;
   const start = performance.now();
   try {
     const response = await fetch('/demo/run', {method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-FXBX-Demo': '1'},
-      body: JSON.stringify(readInput())});
+      body: JSON.stringify(config.method === 'predict' && config.lora?.supported
+        ? {...readInput(), loras: selectedLoras()} : readInput())});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || '실행 실패');
     const result = data.result;
+    if (Array.isArray(result?.applied_loras)) {
+      const names = new Map((config.lora?.adapters || []).map(row => [row.id, row.name]));
+      $('applied-loras').textContent = result.applied_loras.length
+        ? '적용한 LoRA: ' + result.applied_loras.map(row => (names.get(row.id) || row.id) + ' (' + row.scale + ')').join(', ')
+        : '기본 모델 · LoRA 적용 없음';
+      $('applied-loras').hidden = false;
+    }
     if (data.image_url) {
       $('image').src = data.image_url;
       $('image').hidden = false;
@@ -139,6 +196,7 @@ document.querySelector('form').addEventListener('submit', async event => {
     $('status').textContent = error.message;
   } finally {
     run.disabled = reset.disabled = sampleFile.disabled = false;
+    $('loras').disabled = false;
   }
 });
 fetch('/demo/config').then(response => response.json()).then(data => {
@@ -148,6 +206,7 @@ fetch('/demo/config').then(response => response.json()).then(data => {
     $('expected').textContent = config.expected_result;
     $('expected').hidden = false;
   }
+  showLoras();
   showExample();
   run.disabled = reset.disabled = sampleFile.disabled = false;
 }).catch(error => { $('status').textContent = error.message; });

@@ -17,8 +17,12 @@ class WebDemo:
         sample = contract.get('example_input')
         if not isinstance(sample, dict):
             sample = {'messages': [{'role': 'user', 'content': ''}]} if method == 'chat' else {}
+        if method=='predict' and (contract.get('inputs',{}).get('output') or {}).get('type')=='path':
+            sample={k:v for k,v in sample.items() if k!='output'}
+        from .lora import catalog
         self.config = {
             'model': session.manifest['model']['name'],
+            'lora': catalog(session.adapter),
             'method': method,
             'example': sample,
             'expected_result': contract.get('expected_result'),
@@ -31,6 +35,13 @@ class WebDemo:
         if self.config['method'] == 'chat':
             return {'result': invoke(lambda: self.session.chat(
                 inputs['messages'], inputs.get('max_new_tokens', 32)))}
+        contract=self.session.manifest.get('io_contract') or {}
+        output=(contract.get('inputs') or {}).get('output') or {}
+        if output.get('type')=='path':
+            root=Path(self.session.report_dir).resolve()/'demo'
+            root.mkdir(parents=True,exist_ok=True)
+            suffix=Path(str((contract.get('example_input') or {}).get('output',''))).suffix
+            inputs['output']=str(root/(token_urlsafe(18)+suffix))
         result = invoke(lambda: self.session.predict(inputs))
         response = {'result': result}
         if isinstance(result, dict) and isinstance(result.get('image_path'), str):

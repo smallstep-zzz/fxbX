@@ -1,0 +1,48 @@
+"""Request-scoped LoRA selection advertised by a trusted package adapter."""
+import math
+from inspect import getattr_static
+
+
+def catalog(adapter):
+    describe = getattr(adapter, 'lora_catalog', None) if getattr_static(adapter,'lora_catalog',None) is not None else None
+    apply = getattr(adapter, 'apply_loras', None) if getattr_static(adapter,'apply_loras',None) is not None else None
+    if not callable(describe) or not callable(apply):
+        return {'supported': False, 'adapters': [], 'max_active': 0,
+                'reason': '이 패키지는 LoRA 적용을 지원하지 않습니다.'}
+    rows = describe()
+    if not isinstance(rows, list) or len(rows) > 64:
+        raise ValueError('Invalid package LoRA catalog')
+    seen = set(); result = []
+    for row in rows:
+        if not isinstance(row, dict):raise ValueError('Invalid LoRA catalog entry')
+        key = row.get('id');name = row.get('name', key)
+        if (not isinstance(key,str) or not 1 <= len(key) <= 128 or key in seen
+                or not isinstance(name,str) or not 1 <= len(name) <= 256):
+            raise ValueError('Invalid or duplicate LoRA identity')
+        seen.add(key)
+        low, high, default = (row.get(k,v) for k,v in [('min_scale',0.0),('max_scale',1.0),('default_scale',1.0)])
+        if any(type(v) not in (int,float) or not math.isfinite(v) for v in (low,high,default)) or not low <= default <= high:
+            raise ValueError('Invalid LoRA scale range')
+        result.append({'id':key,'name':name,'description':str(row.get('description',''))[:1000],
+                       'min_scale':low,'max_scale':high,'default_scale':default})
+    limit = getattr(adapter,'max_active_loras',1)
+    if type(limit) is not int or not 1 <= limit <= 8:raise ValueError('Invalid LoRA selection limit')
+    return {'supported':True,'adapters':result,'max_active':limit,
+            'reason':'' if result else '이 모델에 등록된 LoRA가 없습니다.'}
+
+
+def selection(value, info):
+    if not isinstance(value,list):raise ValueError('loras must be a list')
+    if not info['supported'] and value:raise ValueError('This package does not support LoRA')
+    if len(value)>info['max_active']:raise ValueError('Too many active LoRAs')
+    known={r['id']:r for r in info['adapters']};seen=set();result=[]
+    for item in value:
+        if not isinstance(item,dict) or set(item)-{'id','scale'}:raise ValueError('Expected LoRA id and scale')
+        key=item.get('id')
+        if not isinstance(key,str) or key not in known or key in seen:raise ValueError('Unknown or duplicate LoRA')
+        row=known[key];scale=item.get('scale',row['default_scale'])
+        if type(scale) not in (int,float) or not math.isfinite(scale) or not row['min_scale']<=scale<=row['max_scale']:
+            raise ValueError('LoRA scale is outside the supported range')
+        seen.add(key)
+        if scale!=0:result.append({'id':key,'scale':float(scale)})
+    return sorted(result,key=lambda r:r['id'])
