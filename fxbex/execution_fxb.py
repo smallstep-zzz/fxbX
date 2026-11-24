@@ -458,6 +458,43 @@ class ExecutionFXB:
                 else:self.resident[name]=self.resident[uploaded[target]]
         self._sync();self.states={};self._default_ready=False;self.failed=False
         self._build_sequences()
+    def replace_parameters(self, values, *, max_bytes=2*1024**3):
+        """Upload complete parameter inputs without changing EDFs or checkpoint files.
+
+        Requests must serialize updates with execution. A device update failure
+        leaves this session failed; unload before using it again.
+        """
+        with self._lock:
+            if self.stack is None or self.failed:raise ExecutionPlanError('Session is not ready')
+            if any(r['state_updates'] for r in self.plan['entries'].values()):
+                raise ExecutionPlanError('Parameter updates require a stateless plan')
+            torch=self.torch;bindings={};total=0
+            for target,value in values.items():
+                matches=[(n,s) for n,s in self.plan['tensors'].items() if s.get('target')==target]
+                if not matches or any(s['kind']!='parameter' or 'checkpoint_slice' in s for _,s in matches):
+                    raise ExecutionPlanError('Only complete parameter inputs may be replaced: '+target)
+                if any(g['target']==target for g in self.plan.get('frozen_buffer_guards',[])):
+                    raise ExecutionPlanError('Cannot replace a compiled constant: '+target)
+                if not isinstance(value,torch.Tensor) or value.device.type!='cpu' or value.requires_grad:
+                    raise ExecutionPlanError('Replacement parameters must be detached CPU tensors')
+                if any(not _tensor_matches(value,s,torch) for _,s in matches) or not torch.isfinite(value).all():
+                    raise ExecutionPlanError('Replacement shape/dtype/layout/values differ: '+target)
+                total+=value.numel()*value.element_size()
+                if total>max_bytes:raise ExecutionPlanError('Parameter update exceeds staging memory budget')
+                bindings[target]=(value,matches)
+            if not bindings:return
+            resident=self.resident;sequences=self._sequences
+            try:
+                updated=dict(resident)
+                for value,matches in bindings.values():
+                    uploaded=self._upload(value,matches[0][1])
+                    for name,_ in matches:updated[name]=uploaded
+                self._sync();self.resident=updated;self._sequences={}
+                self._build_sequences();self._sync()
+            except BaseException:
+                self.resident=resident;self._sequences=sequences;self.failed=True
+                raise
+
     def _build_sequences(self):
         """Replay each stateless entry as one SDK RunnableSequence: one host call per request.
 

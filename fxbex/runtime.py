@@ -8,6 +8,7 @@ import subprocess
 import sys
 import warnings
 import time
+import threading
 from .package import extract, PackageError
 from .settings import lock_path, runs_path
 from .compatibility import version_notice
@@ -90,6 +91,7 @@ class Session:
         self.telemetry = None
         self.memory = None
         self.failed = False
+        self._predict_lock = threading.RLock()
 
     def __enter__(self):
         try:
@@ -170,9 +172,28 @@ class Session:
         finally:
             self.sample_memory(f'after_{operation}')
 
+    def lora_catalog(self):
+        from .lora import catalog
+        return catalog(self.adapter)
+
     def predict(self, inputs):
         if not hasattr(self.adapter, 'predict'):raise ValueError('Package does not provide predict')
-        return self._call('predict', lambda: self.adapter.predict(inputs))
+        # Hold selection, weight changes and execution together; a following request
+        # without LoRAs explicitly restores the base model.
+        with self._predict_lock:
+            from .lora import selection
+            info=self.lora_catalog()
+            requested=inputs.get('loras',[]) if isinstance(inputs,dict) else []
+            chosen=selection(requested,info)
+            payload=dict(inputs) if isinstance(inputs,dict) else inputs
+            if isinstance(payload,dict):payload.pop('loras',None)
+            def run():
+                if info['supported']:self.adapter.apply_loras(chosen)
+                result=self.adapter.predict(payload)
+                if info['supported'] and isinstance(result,dict):
+                    result=dict(result,applied_loras=chosen)
+                return result
+            return self._call('predict',run)
 
     def predict_tensors(self, inputs, *, output_device='cpu'):
         if not hasattr(self.adapter,'predict_tensors'):raise NotImplementedError('Adapter has no tensor execution contract')

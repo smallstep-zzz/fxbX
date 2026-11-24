@@ -90,3 +90,14 @@ class BrowserDemoTest(TestCase):
         with self.assertRaises(HTTPError) as invalid:
             self.request('/demo/run', {'image': {'$asset': '../sample.png'}})
         self.assertEqual(invalid.exception.code, 400)
+
+    def test_browser_manages_output_path_and_reports_capabilities(self):
+        sample={'prompt':'fox','output':'/outside/result.png'}
+        session=self.start('predict',sample,predict=Mock(return_value={}))
+        session.manifest['io_contract']['inputs']={'output':{'type':'path'}}
+        with self.request('/demo/config') as response:
+            self.assertFalse(json.load(response)['lora']['supported'])
+        with self.request('/demo/run',sample):pass
+        actual=session.predict.call_args.args[0]
+        self.assertTrue(Path(actual['output']).is_relative_to(session.report_dir))
+        self.assertTrue(actual['output'].endswith('.png'))
