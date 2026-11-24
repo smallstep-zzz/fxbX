@@ -14,7 +14,7 @@ def main():
     if sys.platform.startswith('linux'):
         if ctypes.CDLL(None,use_errno=True).prctl(1,signal.SIGTERM,0,0,0)!=0:raise OSError('parent-death signal failed')
         if os.getppid()!=parent or parent==1:raise RuntimeError('Parent exited')
-    protocol=sys.stdout;session=None
+    protocol=sys.stdout;session=None;demo=None
     try:
         for line in sys.stdin:
             request={}
@@ -23,9 +23,35 @@ def main():
                 with contextlib.redirect_stdout(sys.stderr):
                     if request['action']=='load':
                         if session:raise RuntimeError('Package already loaded')
-                        print('@@FXBEX_PROGRESS@@'+json.dumps({'phase':'loading','label':'FXB_EX: 무결성 검사·가중치 적재·커널 복원 중'}),file=protocol,flush=True)
-                        candidate=Session(sys.argv[1]);candidate.__enter__();session=candidate
-                        result={'ok':True,'metrics':getattr(session.adapter,'acceptance',{}),'report_dir':str(session.report_dir),'context_limit':getattr(getattr(session.adapter,'runtime',None),'capacity',512),'memory':session.memory}
+                        print('@@FXBEX_PROGRESS@@'+json.dumps({'phase':'loading','label':'모델 검사·가중치 적재·NPU 실행 준비 중'}),file=protocol,flush=True)
+                        options=request.get('options',{})
+                        if not isinstance(options,dict) or set(options)-{'weights_dir','report_dir','allow_sdk_mismatch'}:raise ValueError('Invalid load options')
+                        from .native_fxb import read_native_manifest
+                        from .native_session import NativeSession
+                        session_type=NativeSession if read_native_manifest(sys.argv[1]) is not None else Session
+                        candidate=session_type(sys.argv[1],**options)
+                        candidate.__enter__()
+                        try:
+                            from .lora import selection
+                            from .web_demo import WebDemo
+                            candidate.default_loras=selection(request.get('loras',[]),candidate.lora_catalog())
+                            demo=WebDemo(candidate)
+                        except BaseException:
+                            candidate.__exit__(*sys.exc_info());raise
+                        session=candidate
+                        result={'ok':True,'metrics':getattr(session.adapter,'acceptance',{}),'report_dir':str(session.report_dir),'context_limit':getattr(getattr(session.adapter,'runtime',None),'capacity',512),'memory':session.memory,'web_config':demo.config}
+                    elif request['action']=='web':
+                        if not session:raise RuntimeError('Load package first')
+                        operation=request.get('operation');payload=request.get('payload')
+                        if operation=='config':value=demo.config
+                        elif operation=='loras':value=demo.loras()
+                        elif operation=='run':value=demo.run(payload,lambda callback:callback())
+                        elif operation in ('search','import'):value=demo.hub_request(operation,payload)
+                        elif operation=='image':
+                            import base64
+                            data,mime=demo.image(payload);value={'mime':mime,'base64':base64.b64encode(data).decode('ascii')}
+                        else:raise ValueError('Unknown browser operation')
+                        result={'ok':True,'value':value}
                     elif request['action']=='chat':
                         if not session:raise RuntimeError('Load package first')
                         result={'ok':True,**session.chat(request['messages'],request['max_new_tokens'])}
@@ -50,7 +76,7 @@ def main():
                         result={'ok':True,'memory':memory}
                     else:raise ValueError('Unknown worker action')
             except Exception as exc:
-                traceback.print_exc(file=sys.stderr);result={'ok':False,'error':str(exc)}
+                traceback.print_exc(file=sys.stderr);result={'ok':False,'error':str(exc),'fatal':session is None or session.failed}
             print('@@FXBEX_RESPONSE@@'+json.dumps(result,ensure_ascii=False),file=protocol,flush=True)
             if request.get('action')=='unload':break
     finally:

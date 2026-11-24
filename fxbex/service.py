@@ -11,15 +11,22 @@ import time
 import weakref
 from .settings import runs_path, runtime_python
 
+class WorkerRequestError(RuntimeError):
+    def __init__(self,message,*,fatal=False):
+        super().__init__(message);self.fatal=fatal
+
+
 _services=weakref.WeakSet()
 
 
 class PackageService:
-    def __init__(self,package):
+    def __init__(self,package,*,verbose=False,**load_options):
+        if set(load_options)-{'weights_dir','report_dir','allow_sdk_mismatch'}:raise ValueError('Unknown worker load option')
+        self.verbose=verbose;self.load_options=load_options
         self.package=str(Path(package).resolve())
         self.lock=threading.RLock()
         self.process=None;self.log=None;self.log_path=None;self.loaded=False
-        self.context_limit=512
+        self.context_limit=512;self._cancelled=threading.Event()
         _services.add(self)
 
     def stop(self):
@@ -36,6 +43,12 @@ class PackageService:
             if self.log:self.log.close();self.log=None
             self.loaded=False
 
+    def cancel(self):
+        """Cancel only this owned worker, including the spawn/first-read race."""
+        self._cancelled.set()
+        process=self.process
+        if process is not None and process.poll() is None:process.terminate()
+
     def _start(self):
         run=runs_path()/f'ui_{time.time_ns()}';run.mkdir(parents=True)
         self.log_path=run/'worker.log';self.log=self.log_path.open('w')
@@ -43,7 +56,8 @@ class PackageService:
         worker_python=runtime_python()
         from .sdk_runner import worker_command
         self.process=subprocess.Popen(worker_command(worker_python,'fxbex.worker',self.package),env=env,
-            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None if self.verbose else self.log,text=True,bufsize=1)
+        if self._cancelled.is_set():self.process.terminate()
 
     def _request(self,request,on_progress=None,on_token=None):
         try:
@@ -57,25 +71,35 @@ class PackageService:
                     if on_token:on_token(event)
                 elif line.startswith('@@FXBEX_RESPONSE@@'):
                     response=json.loads(line[len('@@FXBEX_RESPONSE@@'):])
-                    if not response.get('ok'):raise RuntimeError(response.get('error','Worker failed'))
+                    if not response.get('ok'):
+                        raise WorkerRequestError(response.get('error','Worker failed'),fatal=response.get('fatal',True))
                     return response
                 else:self.log.write(line);self.log.flush()
             code=self.process.wait()
             raise RuntimeError(f'FXBEX worker exited ({code}); see {self.log_path}')
+        except WorkerRequestError as exc:
+            if exc.fatal:self.stop()
+            raise
         except BaseException:self.stop();raise
 
-    def load(self,on_progress=None):
+    def load(self,on_progress=None,*,loras=None):
         with self.lock:
+            if self._cancelled.is_set():raise RuntimeError('Worker service was cancelled')
             if self.loaded and self.process and self.process.poll() is None:return {'ok':True}
             self.stop()
             try:
                 self._start()
-                result=self._request({'action':'load'},on_progress)
+                result=self._request({'action':'load','options':self.load_options,'loras':loras or []},on_progress)
                 capacity=result.get('context_limit',512)
                 if type(capacity) is not int or capacity<1:raise ValueError('Invalid worker context limit')
                 self.context_limit=capacity;self.loaded=True
                 return result
             except BaseException:self.stop();raise
+
+    def web(self,operation,payload=None):
+        with self.lock:
+            if not self.loaded:raise RuntimeError('Load a package first')
+            return self._request({'action':'web','operation':operation,'payload':payload})['value']
 
     def chat(self,messages,max_new_tokens=32,on_progress=None):
         with self.lock:

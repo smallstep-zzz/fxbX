@@ -14,6 +14,16 @@ class NativeFXBError(ValueError):
     """The native archive contract or official reader gate failed."""
 
 
+def read_native_manifest(path):
+    """Identify transport only; full integrity and SDK admission remain in the loader."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.getinfo('manifest.json').file_size>MAX_JSON_SIZE:raise ValueError('Manifest exceeds JSON limit')
+            value=json.loads(archive.read('manifest.json'))
+    except (FileNotFoundError,IsADirectoryError,zipfile.BadZipFile,KeyError):return None
+    return value if isinstance(value,dict) and value.get('format_version')==2 and value.get('format')!='FXB_EX' else None
+
+
 def _json(data, *, max_size=MAX_JSON_SIZE):
     if len(data) > max_size:
         raise NativeFXBError('Native JSON exceeds size limit')

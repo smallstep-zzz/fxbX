@@ -183,10 +183,12 @@ class Session:
         with self._predict_lock:
             from .lora import selection
             info=self.lora_catalog()
-            requested=inputs.get('loras',[]) if isinstance(inputs,dict) else []
+            requested=inputs.get('loras',getattr(self,'default_loras',[])) if isinstance(inputs,dict) else []
             chosen=selection(requested,info)
             payload=dict(inputs) if isinstance(inputs,dict) else inputs
             if isinstance(payload,dict):payload.pop('loras',None)
+            validate=getattr(self.adapter,'validate_predict_inputs',None)
+            if callable(validate):validate(payload)
             def run():
                 if info['supported']:self.adapter.apply_loras(chosen)
                 result=self.adapter.predict(payload)

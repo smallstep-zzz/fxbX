@@ -52,3 +52,17 @@ class LoraTest(TestCase):
         for extra in ({'trigger_words':'not-a-list'},{'example_prompt':3},{'source_url':'javascript:alert(1)'},{'source_url':'https://huggingface.co.evil.test/owner/model'}):
             adapter.lora_catalog=lambda value=extra:[{'id':'style','name':'Style',**value}]
             with self.assertRaises(ValueError):catalog(adapter)
+
+    def test_explicit_empty_overrides_command_line_default(self):
+        s=self.session();s.default_loras=[{'id':'style','scale':.5}]
+        self.assertEqual(s.predict({'prompt':'one'})['applied_loras'],s.default_loras)
+        self.assertEqual(s.predict({'prompt':'two','loras':[]})['applied_loras'],[])
+
+    def test_host_preflight_rejects_before_lora_mutation_without_poisoning(self):
+        s=self.session();applied=[];s.adapter.apply_loras=lambda chosen:applied.append(chosen)
+        def reject(payload):raise ValueError('Prompt exceeds context')
+        s.adapter.validate_predict_inputs=reject
+        with self.assertRaisesRegex(ValueError,'context'):s.predict({'prompt':'too long','loras':[{'id':'style'}]})
+        self.assertFalse(s.failed);self.assertFalse(applied)
+        del s.adapter.validate_predict_inputs
+        self.assertEqual(s.predict({'prompt':'valid'})['applied_loras'],[])
