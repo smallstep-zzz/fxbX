@@ -239,7 +239,7 @@ sampleFile.addEventListener('change',async()=>{
 form.addEventListener('submit',async event=>{
   event.preventDefault();if(running) return;
   running=true;run.disabled=reset.disabled=sampleFile.disabled=true;$('loras').disabled=true;
-  status('실행 중 · LoRA가 바뀌면 가중치를 준비합니다.');$('connection').textContent='처리 중';
+  status(loraReaders.some(row=>row.check.checked)?'실행 중 · LoRA가 바뀌면 가중치를 준비합니다.':'실행 중…');$('connection').textContent='처리 중';
   $('answer').textContent='';document.querySelector('.result-stage').classList.remove('text-output');$('details').hidden=$('image').hidden=$('applied-loras').hidden=$('download').hidden=true;
   $('empty-result').hidden=false;$('empty-result').querySelector('strong').textContent='결과를 생성하고 있습니다.';
   const start=performance.now();
