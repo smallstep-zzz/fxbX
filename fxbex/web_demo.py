@@ -23,10 +23,34 @@ class WebDemo:
         self.config = {
             'model': session.manifest['model']['name'],
             'lora': catalog(session.adapter),
+            'lora_hub': self.hub() is not None,
             'method': method,
+            'inputs': contract.get('inputs') or {},
+            'outputs': contract.get('outputs') or {},
             'example': sample,
             'expected_result': contract.get('expected_result'),
         }
+
+    def hub(self):
+        from inspect import getattr_static
+        from .lora_hub import HfLoraLibrary
+        adapter=self.session.adapter
+        value=getattr(adapter,'lora_hub',None) if getattr_static(adapter,'lora_hub',None) is not None else None
+        return value if isinstance(value,HfLoraLibrary) else None
+
+    def hub_request(self, operation, request):
+        hub=self.hub()
+        if hub is None:raise ValueError('이 패키지는 Hugging Face LoRA 가져오기를 지원하지 않습니다.')
+        if not isinstance(request,dict):raise ValueError('Expected a JSON object')
+        if operation=='search':return {'results':hub.search(request.get('query',''))}
+        if set(request)!={'repo','revision','filename'}:raise ValueError('Choose repository, revision and weight file')
+        with self.session._predict_lock:
+            key=hub.install(**request)
+        return {'id':key,'lora':self.loras()}
+
+    def loras(self):
+        from .lora import catalog
+        return catalog(self.session.adapter)
 
     def run(self, request, invoke):
         if not isinstance(request, dict):

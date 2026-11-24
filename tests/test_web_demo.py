@@ -101,3 +101,33 @@ class BrowserDemoTest(TestCase):
         actual=session.predict.call_args.args[0]
         self.assertTrue(Path(actual['output']).is_relative_to(session.report_dir))
         self.assertTrue(actual['output'].endswith('.png'))
+
+    def test_lora_refresh_endpoint_reads_current_catalog_without_inference(self):
+        session=self.start('predict',{'prompt':'fox'},predict=Mock(return_value={}))
+        session.adapter.lora_catalog=lambda:[{'id':'style','name':'Style','trigger_words':['toy_face'],'example_prompt':'toy_face, portrait'}]
+        session.adapter.apply_loras=lambda selected:None
+        with self.request('/demo/loras') as response:
+            self.assertEqual(response.headers['Cache-Control'],'no-store')
+            info=json.load(response)
+        self.assertTrue(info['supported'])
+        self.assertEqual(info['adapters'][0]['example_prompt'],'toy_face, portrait')
+        session.predict.assert_not_called()
+
+    def test_hub_import_requires_same_browser_guard_and_package_capability(self):
+        self.start('predict',{'prompt':'fox'},predict=Mock(return_value={}))
+        with self.assertRaises(HTTPError) as denied:self.request('/demo/hub/import',{},demo=False)
+        self.assertEqual(denied.exception.code,403)
+        with self.assertRaises(HTTPError) as unsupported:self.request('/demo/hub/search',{'query':'portrait'})
+        self.assertEqual(unsupported.exception.code,400)
+
+    def test_hub_routes_search_and_import_without_inference(self):
+        from fxbex.lora_hub import HfLoraLibrary
+        from threading import Lock
+        session=self.start('predict',{'prompt':'fox'},predict=Mock(return_value={}))
+        hub=object.__new__(HfLoraLibrary);hub.search=Mock(return_value=[{'repo':'owner/style'}]);hub.install=Mock(return_value='hf-style')
+        session.adapter.lora_hub=hub;session._predict_lock=Lock()
+        with self.request('/demo/hub/search',{'query':'style'}) as response:
+            self.assertEqual(json.load(response)['results'][0]['repo'],'owner/style')
+        payload={'repo':'owner/style','revision':'a'*40,'filename':'style.safetensors'}
+        with self.request('/demo/hub/import',payload) as response:self.assertEqual(json.load(response)['id'],'hf-style')
+        hub.install.assert_called_once_with(**payload);session.predict.assert_not_called()

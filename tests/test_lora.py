@@ -41,3 +41,14 @@ class LoraTest(TestCase):
         s=self.session();calls=[];s.adapter.predict=lambda payload:calls.append(payload)
         with self.assertRaises(ValueError):s.predict({'loras':[{'id':'bad'}]})
         self.assertFalse(s.failed);self.assertFalse(calls)
+
+    def test_prompt_metadata_and_external_source_validation(self):
+        adapter=self.adapter()
+        adapter.lora_catalog=lambda:[{'id':'style','name':'Style','trigger_words':['toy_face'],
+            'example_prompt':'toy_face, a portrait','source_url':'https://huggingface.co/example/style'}]
+        info=catalog(adapter)
+        self.assertEqual(info['adapters'][0]['trigger_words'],['toy_face'])
+        self.assertEqual(info['adapters'][0]['example_prompt'],'toy_face, a portrait')
+        for extra in ({'trigger_words':'not-a-list'},{'example_prompt':3},{'source_url':'javascript:alert(1)'},{'source_url':'https://huggingface.co.evil.test/owner/model'}):
+            adapter.lora_catalog=lambda value=extra:[{'id':'style','name':'Style',**value}]
+            with self.assertRaises(ValueError):catalog(adapter)

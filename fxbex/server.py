@@ -16,12 +16,15 @@ def serve(session,port,*,invoke=None):
     class Handler(BaseHTTPRequestHandler):
         def send(self,code,value):
             data=json.dumps(value,ensure_ascii=False).encode()
-            self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+            self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data)
         def do_GET(self):
             if self.path == '/':
                 self.send_demo_bytes(Path(__file__).with_name('web_demo.html').read_bytes(), 'text/html; charset=utf-8')
             elif self.path == '/demo/config':
                 self.send(200,demo.config)
+            elif self.path == '/demo/loras':
+                try:self.send(200,demo.loras())
+                except (ValueError,TypeError) as exc:self.send(400,{'error':{'message':str(exc)}})
             elif self.path.startswith('/demo/image/'):
                 try:
                     data, mime = demo.image(self.path.removeprefix('/demo/image/'))
@@ -46,14 +49,17 @@ def serve(session,port,*,invoke=None):
                 n=int(self.headers.get('Content-Length','0'))
                 if not 0<n<=body_limit:raise ValueError(f'Request must be 1..{body_limit} bytes')
                 request=json.loads(self.rfile.read(n))
-                if self.path == '/demo/run':
+                if self.path.startswith('/demo/'):
                     host = self.headers.get('Host', '')
                     if (host.partition(':')[0] not in ('127.0.0.1', 'localhost')
                             or self.headers.get('Origin', 'http://' + host) != 'http://' + host
                             or self.headers.get('X-FXBX-Demo') != '1'):
                         self.send(403,{'error':{'message':'Local browser requests only'}})
                         return
-                    self.send(200,demo.run(request,invoke))
+                    if self.path == '/demo/run':self.send(200,demo.run(request,invoke))
+                    elif self.path in ('/demo/hub/search','/demo/hub/import'):
+                        self.send(200,demo.hub_request(self.path.rsplit('/',1)[1],request))
+                    else:self.send(404,{'error':'Unknown endpoint'})
                 elif self.path=='/v1/chat/completions':
                     supported={'model','messages','max_tokens','max_completion_tokens','stream','temperature','n'}
                     unsupported=sorted(set(request)-supported)
