@@ -54,18 +54,8 @@ def _run_native_graph_sample(package, output):
 
 
 def _native_manifest(path):
-    """Return a native FXB v2 manifest, or None for FXB_EX packages and catalog names."""
-    from .native_fxb import MAX_JSON_SIZE
-    try:
-        with ZipFile(path) as archive:
-            if archive.getinfo('manifest.json').file_size > MAX_JSON_SIZE:
-                raise ValueError('Manifest exceeds JSON limit')
-            manifest = json.loads(archive.read('manifest.json'))
-    except (FileNotFoundError, IsADirectoryError, BadZipFile, KeyError):
-        return None
-    if isinstance(manifest, dict) and manifest.get('format_version') == 2 and manifest.get('format') != 'FXB_EX':
-        return manifest
-    return None
+    from .native_fxb import read_native_manifest
+    return read_native_manifest(path)
 
 
 def _inspect_native(path, manifest, memory):
@@ -161,6 +151,7 @@ def _main(argv=None):
   fxbx validate model.fxbx --weights-dir ./weights
   fxbx run model.fxbx --input inputs.json -o result.json
   fxbx chat model.fxbx
+  fxbx serve --port 8000
   fxbx serve model.fxbx --port 8000
   fxbx doctor
 
@@ -180,7 +171,7 @@ Run precompiled packages from a file or the model catalog.""")
         p=sub.add_parser(name,help='Show I/O contract or example input without running the model')
         p.add_argument('package')
     sub.add_parser('doctor', help='Report installed SDK versions and RNGD device status')
-    p = sub.add_parser('ui', help='Launch the local package interface')
+    p = sub.add_parser('ui', help='Open the model catalog and local serving console')
     p.add_argument('--port', type=int, default=7861, help='HTTP port (default: 7861)')
     for name, help_text in (
         ('run', 'Run JSON inputs or start interactive chat for a chat adapter'),
@@ -189,7 +180,7 @@ Run precompiled packages from a file or the model catalog.""")
         ('serve', 'Serve the loaded package over local HTTP'),
     ):
         p = sub.add_parser(name, help=help_text, description=help_text)
-        p.add_argument('package', help='Path to a .fxbx or legacy .fxbex archive')
+        p.add_argument('package', nargs='?' if name=='serve' else None, help='Model catalog ID or local .fxbx archive')
         p.add_argument('--verbose',action='store_true',help='Show internal SDK/compiler diagnostics on the terminal')
         p.add_argument('--report-dir', help='Directory for runtime logs and evidence')
         p.add_argument('--weights-dir', help='Override external checkpoint/weights directory')
@@ -204,13 +195,31 @@ Run precompiled packages from a file or the model catalog.""")
                 p.add_argument('--image', help='Use an image file instead of the packaged image sample')
         else:
             p.add_argument('--port', type=int, default=8000, help='HTTP port (default: 8000)')
+            p.add_argument('--lora',action='append',default=[],metavar='ID[=SCALE]',help='Restore a packaged or locally imported LoRA')
     p=sub.add_parser('fetch', help='Download a catalog release into the shared FXBEX cache')
     p.add_argument('package')
     p.add_argument('--refresh', action='store_true', help='Recheck catalog and force a fresh HF download')
     p=sub.add_parser('cache', help='List or clear FXBEX-managed model downloads only')
     p.add_argument('operation', choices=['list','clear'])
     p.add_argument('--yes', action='store_true', help='Confirm deletion of managed model downloads')
+    p=sub.add_parser('tunnel',help='Connect your browser computer to a remote serving port over SSH')
+    p.add_argument('host',help='SSH alias or user@hostname; run this on your browser computer')
+    p.add_argument('--local-port',type=int,default=8000)
+    p.add_argument('--remote-port',type=int,default=8000)
+    p.add_argument('--print-only',action='store_true',help='Print the equivalent SSH command without connecting')
     args=parser.parse_args(argv)
+    if args.action=='tunnel':
+        from .tunnel import launch
+        return launch(args.host,args.local_port,args.remote_port,print_only=args.print_only)
+    if args.action in ('ui','serve'):
+        from .portal import launch
+        from .lora import cli_selection
+        initial=getattr(args,'package',None)
+        loras=cli_selection(getattr(args,'lora',[]))
+        if loras and not initial:raise ValueError('--lora requires an initial model')
+        options={k:getattr(args,k) for k in ('weights_dir','report_dir','allow_sdk_mismatch','verbose') if getattr(args,k,None)}
+        launch(args.port,initial=initial,loras=loras,load_options=options)
+        return 0
     if args.action=='cache':
         from .settings import cache_root
         root=cache_root()/'models'
@@ -279,9 +288,6 @@ Run precompiled packages from a file or the model catalog.""")
     elif args.action=='doctor':
         from .runtime import doctor
         result=doctor()
-    elif args.action=='ui':
-        from .ui import launch
-        launch(args.port);return
     else:
         from .runtime import Session
         from .dependencies import MissingPackages, missing_import, offer_install
@@ -314,9 +320,6 @@ Run precompiled packages from a file or the model catalog.""")
             print(f'NPU package ready; reports: {session.report_dir}',file=sys.stderr,flush=True)
             from .execution import memory_text
             print('Memory: '+memory_text(getattr(session,'memory',None)),file=sys.stderr,flush=True)
-            if args.action=='serve':
-                from .server import serve
-                serve(session,args.port,invoke=invoke);return
             if sample_contract is not None:
                 from .schema import resolve_sample
                 data=resolve_sample(sample_contract,session.root,session.manifest)

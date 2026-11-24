@@ -59,3 +59,19 @@ def selection(value, info):
         seen.add(key)
         if scale!=0:result.append({'id':key,'scale':float(scale)})
     return sorted(result,key=lambda r:r['id'])
+
+
+def cli_selection(values):
+    result=[]
+    for value in values:
+        key,sep,scale=value.rpartition('=')
+        if not sep:key=value
+        if not 0<len(key)<=128:raise ValueError('Expected --lora ID[=SCALE]')
+        row={'id':key}
+        if sep:
+            try:row['scale']=float(scale)
+            except ValueError:raise ValueError('Invalid LoRA scale') from None
+            if not math.isfinite(row['scale']):raise ValueError('Invalid LoRA scale')
+        result.append(row)
+    if len(result)>8 or len({r['id'] for r in result})!=len(result):raise ValueError('Duplicate or excessive LoRAs')
+    return result

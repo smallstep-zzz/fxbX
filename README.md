@@ -50,7 +50,7 @@ with LLM("chat.fxbx") as model:
 이미지 감지에는 `YOLO(path).predict(image)`, 이미지 생성에는 `ImageGeneration(path).generate(prompt)`, 일반 모델에는 `Model(path).predict(inputs)`를 사용합니다. 텐서 계약이 선언된 Runnable DAG는 `as_torch(path)`로 추론용 PyTorch 모듈처럼 호출할 수 있습니다. 공식 Furiosa LLM을 쓰는 프로그램에는 [hug 어댑터 예제](examples/hug_llm.py)를 참고하세요.
 
 ```bash
-fxbx serve Qwen3.5-9B-FP8-dynamic --port 8000
+fxbx serve --port 8000
 ```
 
 채팅은 `http://127.0.0.1:8000/v1/chat/completions`에서 OpenAI 호환 비스트리밍 요청을, 예측 모델은 `/predict`에서 JSON 입력을 받습니다. 지원하는 생성 옵션은 모델과 어댑터에 따라 달라집니다.
@@ -65,6 +65,8 @@ fxbx serve Qwen3.5-9B-FP8-dynamic --port 8000
 ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8081:127.0.0.1:8081 SERVER
 ```
 
+`fxbx serve --port 8000`은 FuryAwesome의 모델 카탈로그를 엽니다. 카테고리에서 모델을 고르고 **서빙 시작**을 누르면, 같은 화면에서 샘플을 실행하고 호출 코드를 복사할 수 있습니다. `fxbx serve MODEL`은 해당 모델을 자동으로 적재합니다. 자세한 내용은 [모델 서빙 콘솔](docs/MODEL_CONSOLE.md)을 확인하세요.
+
 기본은 LoRA 없이 바로 실행합니다. 지원 패키지의 웹 화면에서 **LoRA 추가 옵션**을 펼치면 목록·강도·추천 프롬프트를 선택할 수 있습니다. Hub 가져오기를 지원하는 패키지는 Hugging Face 검색과 다운로드·가중치 호환 검사도 제공합니다. 미지원 패키지에는 이 옵션을 표시하지 않습니다. 자세한 범위는 [LoRA 사용 안내](docs/LORA.md)를 확인하세요.
 
 네이티브 실행 계획의 가중치 로딩은 SDK 완료 이벤트로 보호하는 두 버퍼 전송을 사용합니다. 대기열 제한·직렬 비교 옵션·계측 범위는 [가중치 로딩 안내](docs/WEIGHT_LOADING.md)를 확인하세요.
@@ -73,7 +75,7 @@ ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8081:127.0.0.1:8081 SERVER
 
 ## 재사용 가능한 Gradio 모델 페이지
 
-이미 준비된 모델 파일을 로드하고 실행하는 예제입니다. Gradio를 설치한 뒤 `fxbx ui --port 7861`로 로컬 UI를 실행합니다. 모델별 화면을 만들려면 [examples/model_page.py](examples/model_page.py)를 복사하고 `PACKAGE`에 기존 모델 파일 경로를 지정하세요. 페이지에서 모델을 적재·해제하고 실행 시간을 확인할 수 있습니다.
+기본 `fxbx serve`와 `fxbx ui`는 위 모델 서빙 콘솔을 엽니다. Gradio로 별도의 커스텀 화면을 만들려면 Gradio를 설치하고 [examples/model_page.py](examples/model_page.py)를 복사하고 `PACKAGE`에 기존 모델 파일 경로를 지정하세요. 페이지에서 모델을 적재·해제하고 실행 시간을 확인할 수 있습니다.
 
 ## SDK 환경과 파일 형식
 

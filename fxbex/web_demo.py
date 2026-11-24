@@ -24,6 +24,7 @@ class WebDemo:
             'model': session.manifest['model']['name'],
             'lora': catalog(session.adapter),
             'lora_hub': self.hub() is not None,
+            'default_loras':getattr(session,'default_loras',[]),
             'method': method,
             'inputs': contract.get('inputs') or {},
             'outputs': contract.get('outputs') or {},
@@ -50,7 +51,8 @@ class WebDemo:
 
     def loras(self):
         from .lora import catalog
-        return catalog(self.session.adapter)
+        self.config['lora']=catalog(self.session.adapter)
+        return self.config['lora']
 
     def run(self, request, invoke):
         if not isinstance(request, dict):
