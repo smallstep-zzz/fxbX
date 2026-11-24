@@ -22,6 +22,7 @@ def environment():
 
 
 def doctor():
+    from . import __version__
     try:
         p = subprocess.run(['furiosa-smi', 'status'], capture_output=True, text=True, timeout=15)
         device = {'returncode': p.returncode, 'status': p.stdout.strip(), 'error': p.stderr.strip()}
@@ -29,7 +30,8 @@ def doctor():
         device = {'error': str(exc)}
     if device.get('returncode') != 0:
         device['setup_guide'] = RNGD_SETUP
-    return {'packages': environment(), 'device': device, 'format': 'FXB_EX',
+    return {'python': sys.executable, 'fxbx_version': __version__,
+            'packages': environment(), 'device': device, 'format': 'FXB_EX',
             'note': 'Detection is not NPU execution acceptance; packages require matching SDK.'}
 
 

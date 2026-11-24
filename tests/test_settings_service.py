@@ -10,6 +10,17 @@ from fxbex.runtime import resolve_adapter
 
 
 class IntegrationContracts(unittest.TestCase):
+    def test_ui_worker_uses_current_runtime_with_selected_sdk_python(self):
+        from fxbex.sdk_runner import worker_command
+        with tempfile.TemporaryDirectory() as directory:
+            service=PackageService('/tmp/example.fxbx')
+            with patch('fxbex.service.runs_path',return_value=Path(directory)),patch('fxbex.service.runtime_python',return_value='/sdk/python'),patch('fxbex.service.subprocess.Popen') as spawn:
+                spawn.return_value.poll.return_value=0
+                try:
+                    service._start()
+                    self.assertEqual(spawn.call_args.args[0],worker_command('/sdk/python','fxbex.worker',service.package))
+                finally:service.stop()
+
     def test_shared_lock_config_and_override(self):
         with tempfile.TemporaryDirectory() as t:
             config=Path(t)/'config.json'

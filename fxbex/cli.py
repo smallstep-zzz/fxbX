@@ -231,8 +231,9 @@ Run precompiled packages from a file or the model catalog.""")
         interpreter=runtime_python()
         if Path(interpreter)!=Path(sys.executable):
             import subprocess
+            from .sdk_runner import worker_command
             print('Using SDK Python: '+interpreter,file=sys.stderr,flush=True)
-            code=subprocess.call([interpreter,'-m','fxbx',*(sys.argv[1:] if argv is None else map(str,argv))])
+            code=subprocess.call(worker_command(interpreter,'fxbx',*(sys.argv[1:] if argv is None else argv)))
             return code if code>=0 else 128-code
     if args.action=='chat' and not args.input:
         print('Welcome to FXBEX Chat!\nModel: '+args.package+

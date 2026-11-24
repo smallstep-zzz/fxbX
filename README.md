@@ -73,6 +73,8 @@ ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8081:127.0.0.1:8081 SERVER
 
 ## SDK 환경과 파일 형식
 
-NPU 실행에는 대상 모델에 맞는 Furiosa SDK와 PyTorch가 필요합니다. 먼저 `fxbx doctor`를 실행하세요. fxbX는 누락된 패키지의 설치를 제안할 수 있습니다. 시스템 드라이버는 호스트에서 설치해야 합니다. 다른 Python 환경에 호환 SDK와 fxbX를 설치했다면 `FXBEX_WORKER_PYTHON`에 해당 Python 실행 파일의 경로를 지정할 수 있습니다.
+NPU 실행에는 대상 모델에 맞는 Furiosa SDK와 PyTorch가 필요합니다. 먼저 `fxbx doctor`를 실행하세요. fxbX는 누락된 패키지의 설치를 제안할 수 있습니다. 시스템 드라이버는 호스트에서 설치해야 합니다. 다른 Python 환경에 호환 SDK가 설치되어 있다면 `FXBEX_WORKER_PYTHON`에 해당 Python 실행 파일의 경로를 지정할 수 있습니다.
+
+SDK Python을 별도로 지정해도 실행 코드는 현재 CLI의 fxbX 버전을 사용합니다. SDK 환경에 남은 구버전 fxbX로 전환하지 않으며, 그 환경의 Torch·Furiosa SDK와 의존성을 사용합니다. CLI를 갱신하려면 활성 환경에서 `python -m pip install --upgrade fxbx`를 실행하세요.
 
 `.fxbx`와 구형 `.fxbex`는 fxbX 모델 패키지입니다. 공식 `.fxb`는 해당 Furiosa 런타임에서 사용합니다. fxbX는 지원되는 그래프 FXB를 위한 `GraphFXB`와 커스텀 실행 계획을 위한 `ExecutionFXB`도 제공합니다. 일부 파일은 [외부 체크포인트](docs/CHECKPOINT_WEIGHTS.md)가 필요합니다.

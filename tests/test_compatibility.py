@@ -2,6 +2,10 @@ import unittest
 from unittest.mock import patch
 from fxbex.runtime import package_compatibility
 class Compatibility(unittest.TestCase):
+ def test_manifest_dependency_is_queried_even_outside_sdk_summary(self):
+  with patch('fxbex.runtime.environment',return_value={}),patch('fxbex.runtime.installed_version',return_value='0.41.0') as version:
+   self.assertEqual(package_compatibility({'compatibility':{'packages':{'diffusers':'0.41.0'}}}),[])
+   version.assert_called_once_with('diffusers')
  def test_transformers_minor_is_warning(self):
   with patch('fxbex.runtime.environment',return_value={'transformers':'5.22.1'}):
    self.assertEqual(len(package_compatibility({'compatibility':{'packages':{'transformers':'5.20.2'}}})),1)
