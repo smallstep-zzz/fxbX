@@ -42,3 +42,34 @@ HTTP `/predict`도 같은 경로를 사용합니다. 아래 ID는 패키지가 �
 - LoRA CPU 캐시 기본 512MiB, 교체 가중치 staging 기본 2GiB. 어댑터는 실제 환경 예산을 검토한 경우에만 변경 가능.
 
 등록된 LoRA와 베이스 모델의 라이선스를 각각 따라야 합니다. 예제용 파일의 사용 조건이 불명확한 경우 모델 가중치를 새 공개 릴리스로 재배포하지 않습니다.
+
+
+## 목록·프롬프트와 실행
+
+웹의 목록 새로고침은 `/demo/loras`에서 현재 어댑터가 제공하는 목록을 다시 읽습니다. 등록된 목록의 이름·설명·트리거를 검색할 수 있습니다. HF 검색 결과를 무조건 실행 가능한 항목으로 취급하지 않습니다.
+
+카탈로그 항목에 `trigger_words`(최대 16개), `example_prompt`(최대 4,000자), `source_url`(HF 모델 주소)을 선언할 수 있습니다. 트리거 버튼은 사용자가 눌렀을 때만 입력에 추가됩니다. 추천 프롬프트 사용은 해당 LoRA만 선택하고 프롬프트를 채웁니다. "이 LoRA만 실행"은 다른 선택을 해제한 뒤 현재 프롬프트로 실행하며, 입력이 비어 있으면 해당 LoRA의 추천 프롬프트를 사용합니다. 입력을 보고 LoRA를 몰래 바꾸지는 않습니다.
+
+### Hugging Face 검색과 가져오기
+
+웹의 **Hugging Face에서 LoRA 가져오기**는 패키지 어댑터가
+`lora_hub = HfLoraLibrary(bound_loras, base_models=[...], convert=callback)`를
+제공할 때 활성화됩니다. 검색은 공식 Hub API의 `lora`·`base_model` 메타데이터를
+사용하며 `owner/model` 직접 입력도 가능합니다. 메타데이터 일치는 후보 조건일 뿐,
+실행 가능성과 이미지 품질을 보증하지 않습니다.
+
+사용자가 파일을 골라 **다운로드·호환 검사**를 누르면 immutable revision의
+safetensors만 받습니다. 신뢰하는 패키지의 converter는 `(tensor_dict,
+component_bindings)`를 반환해야 합니다. 모든 텐서의 대상·shape·dtype·alpha를
+검사하고, 일부만 적용하거나 원격 Python/pickle 코드를 실행하지 않습니다.
+검사 통과 후에도 자동 적용하지 않으며 목록에서 선택해야 합니다.
+
+가져온 파일과 checksum·출처는 `~/.cache/fxbx/loras/<execution-contract-hash>/`에
+별도로 보관합니다. 원본 FXBX와 manifest는 변경하지 않습니다. 파일당 기본
+512 MiB, 로컬 라이브러리 2 GiB·32개 제한, 원자적 인덱스 교체와 프로세스 잠금을
+사용합니다. 재시작 시 검증 후 복원합니다. 패키지에 converter가 없으면 가져오기
+UI는 숨기며 기존 등록 LoRA 선택은 계속 사용할 수 있습니다.
+
+LoRA는 선택 사항입니다. 처음 화면과 초기화는 LoRA를 선택하지 않으며,
+목록·Hub 가져오기·강도 설정은 기본적으로 접힌 **LoRA 추가 옵션** 안에 있습니다.
+LoRA 없이 프롬프트만 입력하고 바로 실행할 수 있습니다.

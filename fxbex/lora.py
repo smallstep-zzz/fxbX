@@ -1,5 +1,6 @@
 """Request-scoped LoRA selection advertised by a trusted package adapter."""
 import math
+import re
 from inspect import getattr_static
 
 
@@ -23,8 +24,20 @@ def catalog(adapter):
         low, high, default = (row.get(k,v) for k,v in [('min_scale',0.0),('max_scale',1.0),('default_scale',1.0)])
         if any(type(v) not in (int,float) or not math.isfinite(v) for v in (low,high,default)) or not low <= default <= high:
             raise ValueError('Invalid LoRA scale range')
-        result.append({'id':key,'name':name,'description':str(row.get('description',''))[:1000],
-                       'min_scale':low,'max_scale':high,'default_scale':default})
+        entry={'id':key,'name':name,'description':str(row.get('description',''))[:1000],
+               'min_scale':low,'max_scale':high,'default_scale':default}
+        words=row.get('trigger_words',[])
+        if not isinstance(words,list) or len(words)>16 or any(not isinstance(w,str) or not 0<len(w)<=128 for w in words):
+            raise ValueError('Invalid LoRA trigger words')
+        entry['trigger_words']=words
+        prompt=row.get('example_prompt','')
+        if not isinstance(prompt,str) or len(prompt)>4000:raise ValueError('Invalid LoRA example prompt')
+        entry['example_prompt']=prompt
+        url=row.get('source_url','')
+        if not isinstance(url,str) or (url and not re.fullmatch(r'https://huggingface\.co/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',url)):
+            raise ValueError('LoRA source must be a Hugging Face model URL')
+        entry['source_url']=url
+        result.append(entry)
     limit = getattr(adapter,'max_active_loras',1)
     if type(limit) is not int or not 1 <= limit <= 8:raise ValueError('Invalid LoRA selection limit')
     return {'supported':True,'adapters':result,'max_active':limit,
