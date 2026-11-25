@@ -193,8 +193,13 @@ function showExample(sample) {
   $('settings-summary').textContent=[sample.size?sample.size+' × '+sample.size:'',sample.steps?sample.steps+' 스텝':''].filter(Boolean).join(' · ');notifyParent();
 }
 async function hubRequest(operation,payload) {
-  const response=await fetch('/demo/hub/'+operation,{method:'POST',headers:{'Content-Type':'application/json','X-FXBX-Demo':'1'},body:JSON.stringify(payload)});
+  const response=await fetch('/demo/hub/'+operation,{method:'POST',headers:requestHeaders(),body:JSON.stringify(payload)});
   const data=await response.json();if(!response.ok) throw new Error(data.error?.message || 'Hugging Face 요청 실패');return data;
+}
+function requestHeaders() {
+  const headers={'Content-Type':'application/json','X-FXBX-Demo':'1'};
+  if (config.model_key) headers['X-FXBX-Model-Key']=config.model_key;
+  return headers;
 }
 $('hub-search').addEventListener('click',async()=>{
   if(running) return;const button=$('hub-search');button.disabled=true;$('hub-status').textContent='Hugging Face 검색 중…';$('hub-results').replaceChildren();
@@ -249,9 +254,13 @@ form.addEventListener('submit',async event=>{
   $('answer').textContent='';document.querySelector('.result-stage').classList.remove('text-output');$('details').hidden=$('image').hidden=$('applied-loras').hidden=$('download').hidden=true;
   $('empty-result').hidden=false;$('empty-result').querySelector('strong').textContent='결과를 생성하고 있습니다.';
   const start=performance.now();
+  const progress=setInterval(()=>{
+    $('empty-result').querySelector('strong').textContent=
+      '결과를 생성하고 있습니다. '+Math.floor((performance.now()-start)/1000)+'초 경과';
+  },1000);
   try {
     const payload=readInput();if(config.method==='predict' && config.lora?.supported) payload.loras=selectedLoras();
-    const response=await fetch('/demo/run',{method:'POST',headers:{'Content-Type':'application/json','X-FXBX-Demo':'1'},body:JSON.stringify(payload)});
+    const response=await fetch('/demo/run',{method:'POST',headers:requestHeaders(),body:JSON.stringify(payload)});
     const data=await response.json();if(!response.ok) throw new Error(data.error?.message || '실행 실패');
     const result=data.result;
     if(Array.isArray(result?.applied_loras)) {
@@ -266,7 +275,7 @@ form.addEventListener('submit',async event=>{
     const seconds=((performance.now()-start)/1000).toFixed(2);
     status('완료 · '+seconds+'초','success');$('output-tag').textContent=seconds+'s';
   } catch(error) {status(error.message,'error');$('empty-result').querySelector('strong').textContent='실행하지 못했습니다. 입력을 확인해주세요.';}
-  finally {running=false;run.disabled=reset.disabled=sampleFile.disabled=false;$('loras').disabled=false;$('connection').textContent='모델 준비됨';if(parent!==window)parent.postMessage({type:'fxbx-request-finished'},location.origin);}
+  finally {clearInterval(progress);running=false;run.disabled=reset.disabled=sampleFile.disabled=false;$('loras').disabled=false;$('connection').textContent='모델 준비됨';if(parent!==window)parent.postMessage({type:'fxbx-request-finished'},location.origin);}
 });
 function notifyParent(){
   if(window.parent===window || !readInput)return;

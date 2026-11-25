@@ -95,6 +95,7 @@ class ModelManager:
         self.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='fxbx-model-manager')
         self.lock=threading.RLock();self.service=None;self.current=None;self.thread=None;self.switching=False;self.busy=0
         self.closing=False;self.phase='idle';self.error='';self.started=None;self.config=None;self.default_loras=loras or []
+        self.pending = None
         self.initial=None
         if initial:
             path=Path(initial).expanduser()
@@ -127,7 +128,7 @@ class ModelManager:
                 process=self.service.process
                 if not self.service.loaded or (process is not None and process.poll() is not None):
                     self.phase='error';self.error='모델 프로세스가 종료됐습니다'+(f' (종료 코드 {process.poll()})' if process is not None else '')+'. 다시 서빙하세요.'
-            return {'phase':self.phase,'model':self.current,'busy':self.busy,'error':self.error,
+            return {'phase':self.phase,'model':self.current,'target':self.pending,'busy':self.busy,'error':self.error,
                     'elapsed_s':round(time.monotonic()-self.started,1) if self.started else 0,
                     'context_limit':getattr(self.service,'context_limit',512),'config':self.config if self.phase=='ready' else None,'label':getattr(self,'label','')}
 
@@ -138,6 +139,7 @@ class ModelManager:
             if self.closing or self.switching or self.busy:raise ValueError('현재 작업이 끝난 뒤 모델을 전환하세요.')
             if self.phase=='ready' and self.current==identifier:return self.snapshot()
             self.switching=True;self.phase='switching';self.error='';self.started=time.monotonic()
+            self.pending=identifier
             self.thread=self.executor.submit(self._switch,identifier,loras or [])
         return self.snapshot()
 
@@ -148,35 +150,56 @@ class ModelManager:
         return self.snapshot()
 
     def _switch(self,identifier,loras):
+        old = self.service
+        previous = self.current
+        previous_config = self.config
+        restore = identifier is not None and old is not None and old.loaded and previous != identifier
+        service = None
         try:
-            old=self.service
+            if identifier is not None:
+                self.progress('resolving','모델 파일 확인·다운로드 중')
+                path=self.resolve(identifier)
+                if self.closing:raise RuntimeError('Model manager closed')
+                options=self.load_options if identifier==self.initial else {}
+                service=self.factory(path,**options)
             if old:
                 if old.loaded:old.unload()
                 else:old.stop()
-            with self.lock:self.service=None;self.current=identifier;self.config=None
-            if identifier is None:
-                with self.lock:self.phase='idle';self.started=None
-                return
-            self.progress('resolving','모델 파일 확인·다운로드 중')
-            path=self.resolve(identifier)
-            if self.closing:raise RuntimeError('Model manager closed')
-            options=self.load_options if identifier==self.initial else {}
-            service=self.factory(path,**options)
             with self.lock:
-                if self.closing:raise RuntimeError('Model manager closed')
                 self.service=service
-            loaded=service.load(self.progress,loras=loras)
-            config=loaded.get('web_config') or service.web('config')
-            config=self._with_recommended_prompts(config, identifier)
-            with self.lock:
-                if self.closing:raise RuntimeError('Model manager closed')
-                self.config=config;self.phase='ready';self.error=''
+                self.current=identifier
+                self.config=None
+            if identifier is None:
+                with self.lock:self.phase='idle';self.started=None;self.error=''
+                return
+            self._load(service, identifier, loras)
             print('NPU package ready: '+identifier,flush=True)
         except Exception as exc:
-            if self.service:self.service.stop()
-            with self.lock:self.phase='error';self.error=str(exc)[:2000]
+            if service is not None:
+                service.stop()
+            if restore and not self.closing:
+                try:
+                    if not old.loaded:
+                        with self.lock:self.service=old;self.current=previous
+                        self._load(old, previous, (previous_config or {}).get('default_loras', []))
+                    with self.lock:self.phase='ready';self.error=f'{identifier} 전환 실패 · {exc}'[:2000]
+                    return
+                except Exception as recovery_error:
+                    old.stop()
+                    exc=RuntimeError(f'{exc} · 이전 모델 복구 실패: {recovery_error}')
+            with self.lock:self.current=identifier;self.phase='error';self.error=str(exc)[:2000]
         finally:
-            with self.lock:self.switching=False
+            with self.lock:self.switching=False;self.pending=None
+
+    def _load(self, service, identifier, loras):
+        with self.lock:
+            if self.closing:raise RuntimeError('Model manager closed')
+        loaded=service.load(self.progress,loras=loras)
+        config=loaded.get('web_config') or service.web('config')
+        config=self._with_recommended_prompts(config, identifier)
+        with self.lock:
+            if self.closing:raise RuntimeError('Model manager closed')
+            self.config=config;self.phase='ready';self.error=''
 
     def progress(self,phase,label):
         with self.lock:self.phase='loading';self.error='';self.label=str(label)[:300]
@@ -199,7 +222,8 @@ class ModelManager:
             if method=='web':
                 operation = args[0]
                 if operation == 'config':
-                    value = self._with_recommended_prompts(value, identifier)
+                    value = {**self._with_recommended_prompts(value, identifier),
+                             'model_key':hashlib.sha256(identifier.encode()).hexdigest()}
                 elif operation in ('loras', 'import'):
                     info = value if operation == 'loras' else value['lora']
                     info = recommended_prompts(info, self._recommendations(identifier))
@@ -285,7 +309,8 @@ def handler(manager,port):
                 elif self.path=='/manager/stop':self.send(202,manager.stop())
                 elif self.path=='/manager/commands':self.send(200,manager.commands(data['model'],data.get('loras',[]),data.get('inputs'),self.server.server_port))
                 elif self.path=='/demo/run':self.send(200,manager.call('web','run',data,expected_key=self.headers.get('X-FXBX-Model-Key')))
-                elif self.path in ('/demo/hub/search','/demo/hub/import'):self.send(200,manager.call('web',self.path.rsplit('/',1)[1],data))
+                elif self.path in ('/demo/hub/search','/demo/hub/import'):
+                    self.send(200,manager.call('web',self.path.rsplit('/',1)[1],data,expected_key=self.headers.get('X-FXBX-Model-Key')))
                 elif self.path=='/predict':
                     result=manager.call('predict',data,expected_key=self.headers.get('X-FXBX-Model-Key'));result.pop('ok',None);self.send(200,result)
                 elif self.path=='/v1/chat/completions':
