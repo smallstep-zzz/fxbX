@@ -365,7 +365,12 @@ def main(argv=None):
     try:
         return _main(argv) or 0
     except Exception as exc:
-        print(f'fxbx: {exc}', file=sys.stderr)
+        from .diagnostics import describe_error
+        detail = describe_error(exc)
+        print(f'fxbx: {detail["message"]}', file=sys.stderr)
+        for key in ('hint', 'url', 'command'):
+            if detail.get(key):
+                print(detail[key],file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

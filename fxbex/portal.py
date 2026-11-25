@@ -13,6 +13,7 @@ from urllib.request import urlopen
 import zipfile
 
 from .hub import CATALOG, catalog_matches, resolve_package, _local_package
+from .diagnostics import describe_error, worker_exit
 from .lora import scene_prompt
 from .service import PackageService, WorkerRequestError
 from .settings import cache_root
@@ -96,6 +97,7 @@ class ModelManager:
         self.lock=threading.RLock();self.service=None;self.current=None;self.thread=None;self.switching=False;self.busy=0
         self.closing=False;self.phase='idle';self.error='';self.started=None;self.config=None;self.default_loras=loras or []
         self.pending = None
+        self.failure = None
         self.initial=None
         if initial:
             path=Path(initial).expanduser()
@@ -127,8 +129,12 @@ class ModelManager:
             if self.phase=='ready' and self.service:
                 process=self.service.process
                 if not self.service.loaded or (process is not None and process.poll() is not None):
-                    self.phase='error';self.error='모델 프로세스가 종료됐습니다'+(f' (종료 코드 {process.poll()})' if process is not None else '')+'. 다시 서빙하세요.'
+                    detail = worker_exit(process.poll() if process is not None else None,
+                                         getattr(self.service, 'log_path', None))
+                    self.phase='error';self.error=detail['message']
+                    self.failure={**detail, 'stage':'runtime', 'model':self.current}
             return {'phase':self.phase,'model':self.current,'target':self.pending,'busy':self.busy,'error':self.error,
+                    'diagnostic':self.failure,
                     'elapsed_s':round(time.monotonic()-self.started,1) if self.started else 0,
                     'context_limit':getattr(self.service,'context_limit',512),'config':self.config if self.phase=='ready' else None,'label':getattr(self,'label','')}
 
@@ -139,6 +145,7 @@ class ModelManager:
             if self.closing or self.switching or self.busy:raise ValueError('현재 작업이 끝난 뒤 모델을 전환하세요.')
             if self.phase=='ready' and self.current==identifier:return self.snapshot()
             self.switching=True;self.phase='switching';self.error='';self.started=time.monotonic()
+            self.failure=None
             self.pending=identifier
             self.thread=self.executor.submit(self._switch,identifier,loras or [])
         return self.snapshot()
@@ -155,6 +162,7 @@ class ModelManager:
         previous_config = self.config
         restore = identifier is not None and old is not None and old.loaded and previous != identifier
         service = None
+        stage = 'download' if identifier is not None else 'unload'
         try:
             if identifier is not None:
                 self.progress('resolving','모델 파일 확인·다운로드 중')
@@ -162,6 +170,7 @@ class ModelManager:
                 if self.closing:raise RuntimeError('Model manager closed')
                 options=self.load_options if identifier==self.initial else {}
                 service=self.factory(path,**options)
+            stage = 'unload'
             if old:
                 if old.loaded:old.unload()
                 else:old.stop()
@@ -170,11 +179,15 @@ class ModelManager:
                 self.current=identifier
                 self.config=None
             if identifier is None:
-                with self.lock:self.phase='idle';self.started=None;self.error=''
+                with self.lock:self.phase='idle';self.started=None;self.error='';self.failure=None
                 return
+            stage = 'load'
             self._load(service, identifier, loras)
             print('NPU package ready: '+identifier,flush=True)
         except Exception as exc:
+            detail = {**describe_error(exc), 'stage':stage, 'model':identifier}
+            if stage == 'load' and getattr(service, 'log_path', None):
+                detail.setdefault('log', str(service.log_path))
             if service is not None:
                 service.stop()
             if restore and not self.closing:
@@ -182,12 +195,15 @@ class ModelManager:
                     if not old.loaded:
                         with self.lock:self.service=old;self.current=previous
                         self._load(old, previous, (previous_config or {}).get('default_loras', []))
-                    with self.lock:self.phase='ready';self.error=f'{identifier} 전환 실패 · {exc}'[:2000]
+                    with self.lock:
+                        self.phase='ready';self.error=f'{identifier} 전환 실패 · {detail["message"]}'
+                        self.failure=detail
                     return
                 except Exception as recovery_error:
                     old.stop()
-                    exc=RuntimeError(f'{exc} · 이전 모델 복구 실패: {recovery_error}')
-            with self.lock:self.current=identifier;self.phase='error';self.error=str(exc)[:2000]
+                    detail['message'] += ' · 이전 모델 복구 실패: ' + describe_error(recovery_error)['message']
+            with self.lock:
+                self.current=identifier;self.phase='error';self.error=detail['message'];self.failure=detail
         finally:
             with self.lock:self.switching=False;self.pending=None
 
@@ -199,7 +215,7 @@ class ModelManager:
         config=self._with_recommended_prompts(config, identifier)
         with self.lock:
             if self.closing:raise RuntimeError('Model manager closed')
-            self.config=config;self.phase='ready';self.error=''
+            self.config=config;self.phase='ready';self.error='';self.failure=None
 
     def progress(self,phase,label):
         with self.lock:self.phase='loading';self.error='';self.label=str(label)[:300]
@@ -233,7 +249,11 @@ class ModelManager:
             return value
         except WorkerRequestError as exc:
             if exc.fatal:
-                with self.lock:self.phase='error';self.error=str(exc)[:2000]
+                detail={**describe_error(exc), 'stage':'inference', 'model':identifier}
+                if getattr(service, 'log_path', None):
+                    detail.setdefault('log', str(service.log_path))
+                with self.lock:
+                    self.phase='error';self.error=detail['message'];self.failure=detail
             raise
         finally:
             with self.lock:self.busy-=1
@@ -276,13 +296,14 @@ def handler(manager,port):
         def send_bytes(self,code,data,mime,*,embedded=False):
             self.send_response(code);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(data)))
             self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
-            self.send_header('Content-Security-Policy',"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; connect-src 'self'; frame-ancestors "+("'self'" if embedded else "'none'")+"; base-uri 'none'")
+            self.send_header('Content-Security-Policy',"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; connect-src 'self'; frame-ancestors "+("'self'" if embedded else "'none'")+"; base-uri 'none'")
             self.end_headers();self.wfile.write(data)
         def send(self,code,value):self.send_bytes(code,json.dumps(value,ensure_ascii=False).encode(),'application/json')
         def do_GET(self):
             try:
                 if self.path=='/':self.send_bytes(200,Path(__file__).with_name('portal.html').read_bytes(),'text/html; charset=utf-8')
                 elif self.path=='/playground':self.send_bytes(200,Path(__file__).with_name('web_demo.html').read_bytes(),'text/html; charset=utf-8',embedded=True)
+                elif self.path=='/diagnostics.js':self.send_bytes(200,Path(__file__).with_name('diagnostics.js').read_bytes(),'text/javascript; charset=utf-8')
                 elif self.path=='/manager/catalog':self.send(200,{'models':manager.models,'initial':manager.initial,'port':self.server.server_port})
                 elif self.path=='/manager/status':self.send(200,manager.snapshot())
                 elif self.path in ('/demo/config','/demo/loras'):self.send(200,manager.call('web','config' if self.path.endswith('config') else 'loras'))
@@ -295,7 +316,7 @@ def handler(manager,port):
                     snapshot=manager.snapshot();model=(snapshot['config'] or {}).get('model',snapshot['model'])
                     self.send(200,{'object':'list','data':[{'id':model,'object':'model'}] if model else [],'loaded':snapshot['phase']=='ready','context_limit':snapshot['context_limit']})
                 else:self.send(404,{'error':{'message':'Unknown endpoint'}})
-            except Exception as exc:self.send(400,{'error':{'message':str(exc)}})
+            except Exception as exc:self.send(400,{'error':{**describe_error(exc), 'fatal':getattr(exc,'fatal',False)}})
         def do_POST(self):
             try:
                 host=self.headers.get('Host','')
@@ -322,7 +343,7 @@ def handler(manager,port):
                     result=manager.call('chat',data['messages'],data.get('max_completion_tokens',data.get('max_tokens',32)))
                     self.send(200,{'id':f'chatcmpl-{time.time_ns()}','object':'chat.completion','created':int(time.time()),'model':config.get('model'),'choices':[{'index':0,'message':{'role':'assistant','content':result['text']},'finish_reason':'stop'}],'fxbex':result})
                 else:self.send(404,{'error':{'message':'Unknown endpoint'}})
-            except Exception as exc:self.send(400,{'error':{'message':str(exc)}})
+            except Exception as exc:self.send(400,{'error':{**describe_error(exc), 'fatal':getattr(exc,'fatal',False)}})
     return Handler
 
 

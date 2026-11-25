@@ -77,16 +77,10 @@ def main():
                     else:raise ValueError('Unknown worker action')
             except Exception as exc:
                 traceback.print_exc(file=sys.stderr)
-                message = str(exc)
-                from huggingface_hub.utils import GatedRepoError
-                if isinstance(exc, GatedRepoError):
-                    from urllib.parse import urlsplit
-                    url = getattr(getattr(exc, 'response', None), 'url', '')
-                    parts = urlsplit(str(url)).path.strip('/').split('/')
-                    repo = '/'.join(parts[:2]) if len(parts) > 2 and parts[2] == 'resolve' else 'the original model'
-                    message = (f'Hugging Face access required for {repo}. Accept the original model terms, '
-                               'then run hf auth login as the account running fxbx on the server and retry.')
-                result={'ok':False,'error':message,'fatal':session is None or session.failed}
+                from .diagnostics import describe_error
+                detail = describe_error(exc)
+                result={'ok':False,'error':detail['message'],'diagnostic':detail,
+                        'fatal':session is None or session.failed}
             print('@@FXBEX_RESPONSE@@'+json.dumps(result,ensure_ascii=False),file=protocol,flush=True)
             if request.get('action')=='unload':break
     finally:

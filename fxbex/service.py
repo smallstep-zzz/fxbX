@@ -12,8 +12,8 @@ import weakref
 from .settings import runs_path, runtime_python
 
 class WorkerRequestError(RuntimeError):
-    def __init__(self,message,*,fatal=False):
-        super().__init__(message);self.fatal=fatal
+    def __init__(self,message,*,fatal=False,diagnostic=None):
+        super().__init__(message);self.fatal=fatal;self.diagnostic=diagnostic
 
 
 _services=weakref.WeakSet()
@@ -72,14 +72,19 @@ class PackageService:
                 elif line.startswith('@@FXBEX_RESPONSE@@'):
                     response=json.loads(line[len('@@FXBEX_RESPONSE@@'):])
                     if not response.get('ok'):
-                        raise WorkerRequestError(response.get('error','Worker failed'),fatal=response.get('fatal',True))
+                        raise WorkerRequestError(response.get('error','Worker failed'),fatal=response.get('fatal',True),
+                                                 diagnostic=response.get('diagnostic'))
                     return response
                 else:self.log.write(line);self.log.flush()
             code=self.process.wait()
-            raise WorkerRequestError(f'FXBEX worker exited ({code}); see {self.log_path}', fatal=True)
+            from .diagnostics import worker_exit
+            detail = worker_exit(code,self.log_path)
+            raise WorkerRequestError(detail['message'], fatal=True, diagnostic=detail)
         except (BrokenPipeError, ConnectionResetError) as exc:
+            from .diagnostics import worker_exit
+            detail = worker_exit(self.process.poll(),self.log_path)
             self.stop()
-            raise WorkerRequestError(f'FXBEX worker connection closed; see {self.log_path}', fatal=True) from exc
+            raise WorkerRequestError(detail['message'], fatal=True, diagnostic=detail) from exc
         except WorkerRequestError as exc:
             if exc.fatal:self.stop()
             raise

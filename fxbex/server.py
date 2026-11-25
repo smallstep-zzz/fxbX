@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 
 from .web_demo import WebDemo
+from .diagnostics import describe_error
 
 
 def serve(session,port,*,invoke=None):
@@ -20,6 +21,8 @@ def serve(session,port,*,invoke=None):
         def do_GET(self):
             if self.path == '/':
                 self.send_demo_bytes(Path(__file__).with_name('web_demo.html').read_bytes(), 'text/html; charset=utf-8')
+            elif self.path == '/diagnostics.js':
+                self.send_demo_bytes(Path(__file__).with_name('diagnostics.js').read_bytes(), 'text/javascript; charset=utf-8')
             elif self.path == '/demo/config':
                 self.send(200,demo.config)
             elif self.path == '/demo/loras':
@@ -41,7 +44,7 @@ def serve(session,port,*,invoke=None):
             self.send_header('Content-Length',str(len(data)))
             self.send_header('X-Content-Type-Options','nosniff')
             self.send_header('Cache-Control','no-store')
-            self.send_header('Content-Security-Policy',"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+            self.send_header('Content-Security-Policy',"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
             self.end_headers()
             self.wfile.write(data)
         def do_POST(self):
@@ -75,7 +78,7 @@ def serve(session,port,*,invoke=None):
                                   'choices':[{'index':0,'message':{'role':'assistant','content':result['text']},'finish_reason':'stop'}],'fxbex':result})
                 elif self.path=='/predict':self.send(200,invoke(lambda: session.predict(request)))
                 else:self.send(404,{'error':'Unknown endpoint'})
-            except Exception as exc:self.send(400,{'error':{'message':str(exc),'type':'invalid_request_error','param':None,'code':None}})
+            except Exception as exc:self.send(400,{'error':{**describe_error(exc),'type':'invalid_request_error','param':None}})
     with HTTPServer(('127.0.0.1',port),Handler) as server:
         print(f'fxbX 웹 화면: http://127.0.0.1:{server.server_port}/ (Ctrl-C로 종료)',flush=True)
         try:server.serve_forever()

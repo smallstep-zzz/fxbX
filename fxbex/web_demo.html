@@ -26,7 +26,7 @@ footer{border-top:1px solid var(--line);display:flex;justify-content:space-betwe
 @media(max-width:760px){.shell{padding:0 18px}.topbar{height:64px}.top-label{display:none}.hero{padding:26px 0 22px}main{grid-template-columns:1fr;gap:18px}.panel{padding:20px}.output-panel{position:static}.result-stage{min-height:260px}footer{font-size:9px;flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 body.embedded .shell{padding:0;max-width:none}body.embedded .topbar,body.embedded .hero,body.embedded footer{display:none}body.embedded main{padding-bottom:0}body.embedded{min-height:0}
-</style>
+.diagnostic{border-left:3px solid #ff5946;background:#1a1110;padding:12px 16px;margin:12px 0;overflow-wrap:anywhere}.diagnostic p{margin:6px 0}.diagnostic pre{margin:8px 0}</style>
 <div class="shell">
 <header class="topbar"><div class="brand">fxb<b>X</b></div><span class="top-label">MODEL PLAYGROUND</span><span class="connection" id="connection">모델 연결 중</span></header>
 <div class="hero"><p class="eyebrow">LOCAL INFERENCE / FURIOSA RNGD</p><h1 id="model">모델 정보 불러오는 중</h1><p class="subhead" id="subhead">프롬프트를 입력해 이미지를 생성하세요.</p></div>
@@ -35,12 +35,12 @@ body.embedded .shell{padding:0;max-width:none}body.embedded .topbar,body.embedde
 <form id="form"><div id="fields"></div>
 <fieldset id="loras" hidden><details id="lora-options"><summary>파인튜닝 · LoRA 추가 옵션 <span id="lora-selection">사용 안 함</span></summary><div class="lora-toolbar"><h3>LoRA <span id="lora-count" class="count"></span></h3><button id="refresh-loras" class="quiet" type="button">목록 새로고침</button></div><p id="lora-note" class="hint"></p><input id="lora-search" class="search" type="search" aria-label="LoRA 검색" placeholder="이름·스타일·트리거 검색" hidden><details id="hub" hidden><summary>Hugging Face에서 LoRA 가져오기</summary><p class="hint">베이스 모델이 일치하는 후보를 검색합니다. 다운로드 후 모든 가중치가 호환 검사를 통과해야 목록에 추가됩니다. 이미지 품질은 별도로 확인해주세요.</p><div class="hub-search"><input id="hub-query" aria-label="Hugging Face LoRA 검색" placeholder="스타일 검색 또는 owner/model"><button type="button" id="hub-search">검색</button></div><p id="hub-status" class="hint" role="status"></p><div id="hub-results"></div></details><div id="lora-list"></div><p id="lora-empty" class="hint" hidden>검색 조건에 맞는 LoRA가 없습니다.</p></details></fieldset>
 <details id="settings" class="settings"><summary>생성 설정 <span id="settings-summary"></span></summary><div id="setting-fields" class="settings-grid"></div><p id="expected" hidden></p></details>
-<button id="run" disabled>실행</button><p id="status" class="status" role="status" aria-live="polite"></p>
+<button id="run" disabled>실행</button><p id="status" class="status" role="status" aria-live="polite"></p><aside id="request-diagnostic" class="diagnostic" hidden></aside>
 <details class="json-input"><summary>JSON 파일로 입력하기</summary><label for="sample-file" hidden>JSON 입력 파일</label><input id="sample-file" type="file" accept=".json,application/json" disabled></details>
 </form></section>
 <section class="panel output-panel" aria-label="실행 결과"><div class="panel-head output-head"><h2><span class="panel-step">02</span>생성 결과</h2><span id="output-tag" class="output-tag">OUTPUT</span></div><div class="result-stage"><div id="empty-result" class="empty"><span class="empty-mark">＋</span><strong>결과가 여기에 표시됩니다.</strong><small>설정을 마친 뒤 실행해주세요.</small></div><img id="image" alt="모델이 생성한 이미지" hidden><pre id="answer"></pre></div><div class="result-meta"><p id="applied-loras" hidden></p><a id="download" class="download" download="result.png" hidden>이미지 저장 ↓</a></div><details id="details" hidden><summary>응답 JSON 보기</summary><pre id="result"></pre></details></section>
 </main><footer><span>fxbX · LOCAL MODEL SERVING</span><span>POWERED BY YOUR NPU <span class="foot-accent">↗</span></span></footer></div>
-<script>const $ = id => document.getElementById(id);
+<script src="/diagnostics.js"></script><script>const $ = id => document.getElementById(id);
 const fields = $('fields'), settingFields = $('setting-fields');
 const run = $('run'), reset = $('reset'), form = $('form'), sampleFile = $('sample-file');
 let config, readInput, fieldId = 0, running = false;
@@ -48,7 +48,8 @@ const loraReaders = [];
 const labels = {prompt:'프롬프트',seed:'시드',size:'해상도',steps:'생성 스텝',width:'너비',height:'높이',
   tensors:'입력 텐서 파일 (safetensors)',state:'상황',context:'문맥',question:'질문',questions:'질문',options:'선택지',choices:'선택지',max_new_tokens:'최대 생성 토큰'};
 const settings = new Set(['seed','size','steps','width','height','max_new_tokens']);
-function status(text, kind='') { $('status').textContent=text; $('status').className='status '+kind; }
+function status(text, kind='') { $('status').textContent=text; $('status').className='status '+kind; renderDiagnostic($('request-diagnostic'),null); }
+function showError(error) { status(error.detail?.hint?'':error.message,'error'); renderDiagnostic($('request-diagnostic'),error.detail?.hint?error.detail:null); }
 function isImage() { return Object.values(config.outputs || {}).some(s => s?.type==='image_path'); }
 function promptInput() { return fields.querySelector('[data-key="prompt"]'); }
 function syncLoras() {
@@ -194,7 +195,7 @@ function showExample(sample) {
 }
 async function hubRequest(operation,payload) {
   const response=await fetch('/demo/hub/'+operation,{method:'POST',headers:requestHeaders(),body:JSON.stringify(payload)});
-  const data=await response.json();if(!response.ok) throw new Error(data.error?.message || 'Hugging Face 요청 실패');return data;
+  const data=await response.json();if(!response.ok) throw fxbxHttpError(response,data);return data;
 }
 function requestHeaders() {
   const headers={'Content-Type':'application/json','X-FXBX-Demo':'1'};
@@ -218,12 +219,12 @@ $('hub-search').addEventListener('click',async()=>{
         try {
           const imported=await hubRequest('import',{repo:item.repo,revision:item.revision,filename:select.value});
           config.lora=imported.lora;showLoras();$('hub-status').textContent='목록에 추가했습니다. 아래에서 선택 후 실행하세요.';
-        } catch(error) {$('hub-status').textContent=error.message;}
+        } catch(error) {$('hub-status').textContent=error.message;showError(error);}
         finally {running=false;$('loras').disabled=false;run.disabled=false;reset.disabled=false;}
       });box.append(add);$('hub-results').append(box);
     }
     $('hub-status').textContent=data.results.length+'개 후보 · 라이선스와 모델 설명은 원본 페이지에서 확인하세요.';
-  } catch(error) {$('hub-status').textContent=error.message;} finally {button.disabled=false;}
+  } catch(error) {$('hub-status').textContent=error.message;showError(error);} finally {button.disabled=false;}
 });
 $('hub-query').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();$('hub-search').click();}});
 $('lora-search').addEventListener('input',filterLoras);
@@ -232,9 +233,9 @@ $('refresh-loras').addEventListener('click',async()=>{
   const button=$('refresh-loras');button.disabled=true;
   try {
     const response=await fetch('/demo/loras',{cache:'no-store'});const data=await response.json();
-    if(!response.ok) throw new Error(data.error?.message || 'LoRA 목록을 불러오지 못했습니다.');
+    if(!response.ok) throw fxbxHttpError(response,data);
     config.lora=data;showLoras();status('LoRA 목록을 갱신했습니다.');
-  } catch(error) {status(error.message,'error');} finally {button.disabled=false;}
+  } catch(error) {showError(error);} finally {button.disabled=false;}
 });
 reset.addEventListener('click',()=>{sampleFile.value='';showExample();$('lora-options').open=false;status('예제 입력으로 초기화했습니다.');});
 sampleFile.addEventListener('change',async()=>{
@@ -244,7 +245,7 @@ sampleFile.addEventListener('change',async()=>{
     const sample=JSON.parse(await file.text());
     if(!sample || typeof sample!=='object' || Array.isArray(sample)) throw new Error('JSON 입력은 객체여야 합니다.');
     showExample(sample);status('JSON 입력을 불러왔습니다.');
-  } catch(error) {status(error.message,'error');}
+  } catch(error) {showError(error);}
 });
 form.addEventListener('submit',async event=>{
   event.preventDefault();if(running) return;
@@ -254,6 +255,7 @@ form.addEventListener('submit',async event=>{
   $('answer').textContent='';document.querySelector('.result-stage').classList.remove('text-output');$('details').hidden=$('image').hidden=$('applied-loras').hidden=$('download').hidden=true;
   $('empty-result').hidden=false;$('empty-result').querySelector('strong').textContent='결과를 생성하고 있습니다.';
   const start=performance.now();
+  let failedWorker=false;
   const progress=setInterval(()=>{
     $('empty-result').querySelector('strong').textContent=
       '결과를 생성하고 있습니다. '+Math.floor((performance.now()-start)/1000)+'초 경과';
@@ -261,7 +263,7 @@ form.addEventListener('submit',async event=>{
   try {
     const payload=readInput();if(config.method==='predict' && config.lora?.supported) payload.loras=selectedLoras();
     const response=await fetch('/demo/run',{method:'POST',headers:requestHeaders(),body:JSON.stringify(payload)});
-    const data=await response.json();if(!response.ok) throw new Error(data.error?.message || '실행 실패');
+    const data=await response.json();if(!response.ok) throw fxbxHttpError(response,data);
     const result=data.result;
     if(Array.isArray(result?.applied_loras)) {
       const names=new Map((config.lora?.adapters || []).map(r=>[r.id,r.name]));
@@ -274,8 +276,8 @@ form.addEventListener('submit',async event=>{
     $('result').textContent=JSON.stringify(result,null,2);$('details').hidden=false;
     const seconds=((performance.now()-start)/1000).toFixed(2);
     status('완료 · '+seconds+'초','success');$('output-tag').textContent=seconds+'s';
-  } catch(error) {status(error.message,'error');$('empty-result').querySelector('strong').textContent='실행하지 못했습니다. 입력을 확인해주세요.';}
-  finally {clearInterval(progress);running=false;run.disabled=reset.disabled=sampleFile.disabled=false;$('loras').disabled=false;$('connection').textContent='모델 준비됨';if(parent!==window)parent.postMessage({type:'fxbx-request-finished'},location.origin);}
+  } catch(error) {showError(error);failedWorker=error.detail?.fatal===true;$('empty-result').querySelector('strong').textContent='실행하지 못했습니다. 아래 원인을 확인해주세요.';}
+  finally {clearInterval(progress);running=false;run.disabled=reset.disabled=sampleFile.disabled=failedWorker;$('loras').disabled=failedWorker;$('connection').textContent=failedWorker?'다시 서빙 필요':'모델 준비됨';if(parent!==window)parent.postMessage({type:'fxbx-request-finished'},location.origin);}
 });
 function notifyParent(){
   if(window.parent===window || !readInput)return;
@@ -286,11 +288,11 @@ if(window.parent!==window){
   new ResizeObserver(()=>parent.postMessage({type:'fxbx-height',height:Math.ceil(document.body.getBoundingClientRect().height)},location.origin)).observe(document.body);
   form.addEventListener('input',notifyParent);form.addEventListener('change',notifyParent);
 }
-fetch('/demo/config',{cache:'no-store'}).then(response=>{if(!response.ok) throw new Error('모델 정보를 불러오지 못했습니다.');return response.json();}).then(data=>{
+fetch('/demo/config',{cache:'no-store'}).then(async response=>{const data=await response.json();if(!response.ok) throw fxbxHttpError(response,data);return data;}).then(data=>{
   config=data;$('hub').hidden=!config.lora_hub;$('model').textContent=config.model;$('connection').textContent='모델 준비됨';
   $('subhead').textContent=isImage()?'프롬프트를 입력해 이미지를 생성하세요.':'입력을 설정하고, 모델의 응답을 확인하세요.';
   if(typeof config.expected_result==='string') {$('expected').textContent=config.expected_result;$('expected').hidden=false;}
   showLoras();showExample();run.textContent=isImage()?'이미지 생성하기':config.method==='chat'?'답변 생성하기':'실행하기';
   run.disabled=reset.disabled=sampleFile.disabled=false;notifyParent();
-}).catch(error=>{status(error.message,'error');$('connection').textContent='연결 확인 필요';});
+}).catch(error=>{showError(error);$('connection').textContent='연결 확인 필요';});
 </script></html>
