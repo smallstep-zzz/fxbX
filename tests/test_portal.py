@@ -61,6 +61,7 @@ class PortalTests(TestCase):
         status=manager.snapshot()
         self.assertEqual((status['phase'],status['model']),('ready','owner/a@v1'))
         self.assertIn('download failed',status['error'])
+        self.assertEqual(status['diagnostic']['stage'],'download')
         self.assertFalse(old.stopped)
     def test_load_failure_restores_previous_model(self):
         manager=self.make();self.ready(manager);old=manager.service
@@ -74,6 +75,7 @@ class PortalTests(TestCase):
         self.assertIs(manager.service,old)
         self.assertTrue(old.loaded)
         self.assertIn('checkpoint unavailable',status['error'])
+        self.assertEqual(status['diagnostic']['stage'],'load')
     def test_same_origin_guard_and_portal_routes(self):
         manager=self.make();server=ThreadingHTTPServer(('127.0.0.1',0),handler(manager,0));t=threading.Thread(target=server.serve_forever,daemon=True);t.start()
         self.addCleanup(t.join,3);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
@@ -89,6 +91,7 @@ class PortalTests(TestCase):
             self.assertEqual(config['model'],'test')
             self.assertEqual(len(config['model_key']),64)
         with urlopen(base+'/playground') as response:self.assertIn("frame-ancestors 'self'",response.headers['Content-Security-Policy'])
+        with urlopen(base+'/diagnostics.js') as response:self.assertIn(b'renderDiagnostic',response.read())
     def test_latest_release_selection(self):
         def row(version):return {'model':{'name':'a','source_repo':'owner/a','category':'Image Generation'},'release':{'version':version,'author_sha256':'hash'}}
         doc={'models':[row('old'),row('new')],'release_order':['owner/a@old#hash','owner/a@new#hash']}
@@ -140,6 +143,7 @@ class SoftWorkerErrors(TestCase):
         with self.assertRaisesRegex(WorkerRequestError, 'exited \\(139\\)') as error:
             service._request({'action':'predict'})
         self.assertTrue(error.exception.fatal)
+        self.assertEqual(error.exception.diagnostic['exit_code'],139)
         self.assertIsNone(service.process)
 
     def test_invalid_hub_request_does_not_terminate_loaded_model(self):
