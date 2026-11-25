@@ -76,7 +76,10 @@ class PackageService:
                     return response
                 else:self.log.write(line);self.log.flush()
             code=self.process.wait()
-            raise RuntimeError(f'FXBEX worker exited ({code}); see {self.log_path}')
+            raise WorkerRequestError(f'FXBEX worker exited ({code}); see {self.log_path}', fatal=True)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            self.stop()
+            raise WorkerRequestError(f'FXBEX worker connection closed; see {self.log_path}', fatal=True) from exc
         except WorkerRequestError as exc:
             if exc.fatal:self.stop()
             raise

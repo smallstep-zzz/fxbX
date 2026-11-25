@@ -52,6 +52,28 @@ class PortalTests(TestCase):
         manager=self.make();manager.resolve=lambda value:(_ for _ in ()).throw(ValueError('bad package'))
         manager.start('owner/a@v1');manager.thread.result(timeout=3);self.assertEqual(manager.snapshot()['phase'],'error')
         manager.resolve=lambda value:'/tmp/model.fxbx';self.ready(manager)
+    def test_bad_download_keeps_previous_worker(self):
+        manager=self.make();self.ready(manager);old=manager.service
+        def unavailable(value):
+            raise OSError('download failed')
+        manager.resolve=unavailable
+        manager.start('owner/b@v1');manager.thread.result(timeout=3)
+        status=manager.snapshot()
+        self.assertEqual((status['phase'],status['model']),('ready','owner/a@v1'))
+        self.assertIn('download failed',status['error'])
+        self.assertFalse(old.stopped)
+    def test_load_failure_restores_previous_model(self):
+        manager=self.make();self.ready(manager);old=manager.service
+        class BrokenService(FakeService):
+            def load(self, progress, *, loras=None):
+                raise RuntimeError('checkpoint unavailable')
+        manager.factory=BrokenService
+        manager.start('owner/b@v1');manager.thread.result(timeout=3)
+        status=manager.snapshot()
+        self.assertEqual((status['phase'],status['model']),('ready','owner/a@v1'))
+        self.assertIs(manager.service,old)
+        self.assertTrue(old.loaded)
+        self.assertIn('checkpoint unavailable',status['error'])
     def test_same_origin_guard_and_portal_routes(self):
         manager=self.make();server=ThreadingHTTPServer(('127.0.0.1',0),handler(manager,0));t=threading.Thread(target=server.serve_forever,daemon=True);t.start()
         self.addCleanup(t.join,3);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
@@ -62,7 +84,10 @@ class PortalTests(TestCase):
         self.assertEqual(denied.exception.code,403)
         with urlopen(Request(base+'/manager/serve',body,{'X-FXBX-Demo':'1'})) as response:self.assertEqual(response.status,202)
         manager.thread.result(timeout=3)
-        with urlopen(base+'/demo/config') as response:self.assertEqual(json.load(response)['model'],'test')
+        with urlopen(base+'/demo/config') as response:
+            config=json.load(response)
+            self.assertEqual(config['model'],'test')
+            self.assertEqual(len(config['model_key']),64)
         with urlopen(base+'/playground') as response:self.assertIn("frame-ancestors 'self'",response.headers['Content-Security-Policy'])
     def test_latest_release_selection(self):
         def row(version):return {'model':{'name':'a','source_repo':'owner/a','category':'Image Generation'},'release':{'version':version,'author_sha256':'hash'}}
@@ -108,6 +133,15 @@ class PortalTests(TestCase):
             with self.assertRaises(ValueError):cli_selection(values)
 
 class SoftWorkerErrors(TestCase):
+    def test_unexpected_worker_exit_is_fatal_and_reports_exit_code(self):
+        service=PackageService('/tmp/model.fxbx')
+        service.process=SimpleNamespace(stdin=io.StringIO(),stdout=io.StringIO(),wait=lambda:139,poll=lambda:139)
+        service.log_path='/some/worker.log'
+        with self.assertRaisesRegex(WorkerRequestError, 'exited \\(139\\)') as error:
+            service._request({'action':'predict'})
+        self.assertTrue(error.exception.fatal)
+        self.assertIsNone(service.process)
+
     def test_invalid_hub_request_does_not_terminate_loaded_model(self):
         service=PackageService('/tmp/model.fxbx');service.loaded=True
         service.process=SimpleNamespace(stdin=io.StringIO(),stdout=io.StringIO('@@FXBEX_RESPONSE@@{"ok":false,"fatal":false,"error":"invalid repository"}\n'))

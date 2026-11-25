@@ -111,7 +111,8 @@ class Session:
             # Share the canonical lock with web workers. Never assume PE partitioning.
             from .settings import delegate_npu_lock, npu_lock
             try: lease = self.stack.enter_context(npu_lock())
-            except BlockingIOError: raise RuntimeError('NPU busy: unload the web model before loading FXB_EX')
+            except BlockingIOError:
+                raise RuntimeError('NPU busy: stop serving on the other fxbX console or wait for the NPU job, then retry.') from None
             kind = self.manifest['runtime']['adapter']
             from .bundled import activate
             bundled = self.stack.enter_context(activate(self.root,self.manifest))
