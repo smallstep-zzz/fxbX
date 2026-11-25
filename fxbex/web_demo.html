@@ -115,17 +115,17 @@ function showLoras() {
       } controls.append(triggers);
     }
     const actions=document.createElement('div'); actions.className='lora-actions';
-    if(item.example_prompt) {
+    if(item.example_prompt && Object.hasOwn(config.example || {},'prompt')) {
       const example=document.createElement('button'); example.type='button'; example.className='secondary'; example.textContent='추천 프롬프트 사용';
       example.addEventListener('click',()=>{
-        const input=promptInput(); if(!input) return;
+        const input=promptInput(); if(!input || input.readOnly) return;
         input.value=item.example_prompt; selectOnly(item.id); input.focus();
       }); actions.append(example);
     }
     const only=document.createElement('button'); only.type='button'; only.className='secondary'; only.textContent='이 LoRA만 실행';
     only.addEventListener('click',()=>{
       selectOnly(item.id); const input=promptInput();
-      if(input && !input.value.trim() && item.example_prompt) input.value=item.example_prompt;
+      if(input && !input.readOnly && !input.value.trim() && item.example_prompt) input.value=item.example_prompt;
       notifyParent();form.requestSubmit();
     }); actions.append(only); controls.append(actions); card.append(controls);
     check.addEventListener('change',()=>{

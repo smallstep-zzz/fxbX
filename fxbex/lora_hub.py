@@ -9,6 +9,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
+from .lora import scene_prompt
 
 _REPO = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*')
 
@@ -71,8 +72,14 @@ class HfLoraLibrary:
         words=card.get('trigger_words',[])
         if isinstance(words,str):words=[words]
         words=[w for w in words if isinstance(w,str) and 0<len(w)<=128][:16] if isinstance(words,list) else []
-        widgets=card.get('widget',[]);prompt=''
-        if isinstance(widgets,list) and widgets and isinstance(widgets[0],dict):prompt=str(widgets[0].get('text',''))[:4000]
+        widgets = card.get('widget', [])
+        prompt = ''
+        if isinstance(widgets, list):
+            for widget in widgets:
+                if isinstance(widget, dict):
+                    prompt = scene_prompt(widget.get('text'), info.id, info.id.rsplit('/', 1)[-1], *words)
+                    if prompt:
+                        break
         compatible=isinstance(bases,list) and bool(set(self.base_models)&set(v for v in bases if isinstance(v,str)))
         return {'repo':info.id,'revision':info.sha,'files':files,'license':str(card.get('license','unknown'))[:200],
                 'base_models':bases,'compatible':compatible,'trigger_words':words,'example_prompt':prompt,

@@ -68,6 +68,37 @@ class PortalTests(TestCase):
         def row(version):return {'model':{'name':'a','source_repo':'owner/a','category':'Image Generation'},'release':{'version':version,'author_sha256':'hash'}}
         doc={'models':[row('old'),row('new')],'release_order':['owner/a@old#hash','owner/a@new#hash']}
         self.assertEqual(catalog_rows(doc)[0]['id'],'owner/a@new')
+    def test_reviewed_prompt_follows_exact_weights_on_load_refresh_and_import(self):
+        manager = self.make()
+        identity = {'source_repo':'owner/style', 'source_revision':'a'*40, 'source_file':'weights.safetensors'}
+        reviewed = 'A delivery robot holding a parcel on a rainy railway platform'
+        manager.models[0]['recommendations'] = [{
+            'repo':'owner/style', 'revision':'a'*40, 'filename':'weights.safetensors',
+            'example_prompt':reviewed, 'trigger':'style',
+        }]
+        info = {**INFO, 'adapters':[
+            {**INFO['adapters'][0], **identity, 'example_prompt':''},
+            {**INFO['adapters'][0], **identity, 'id':'other-version', 'source_revision':'b'*40,
+             'example_prompt':'An old portrait in a studio'},
+            {**INFO['adapters'][0], **identity, 'id':'other-file', 'source_file':'other.safetensors'},
+        ]}
+        config = {**CONFIG, 'lora':info}
+        class Service(FakeService):
+            def load(self, progress, *, loras=None):
+                self.loaded = True
+                return {'web_config':config}
+            def web(self, operation, payload=None):
+                return {'config':config, 'loras':info, 'import':{'id':'style', 'lora':info}}[operation]
+        manager.factory = Service
+        self.ready(manager)
+        for result in (manager.snapshot()['config']['lora'], manager.call('web','config')['lora'],
+                       manager.call('web','loras'), manager.call('web','import',{})['lora']):
+            rows = result['adapters']
+            self.assertEqual(rows[0]['example_prompt'], reviewed)
+            self.assertEqual(rows[0]['default_scale'], .8)
+            self.assertEqual(rows[1]['example_prompt'], 'An old portrait in a studio')
+            self.assertNotIn('example_prompt', rows[2])
+        self.assertEqual(info['adapters'][0]['example_prompt'], '')
     def test_cli_gallery_and_default_lora(self):
         from fxbex.cli import main
         with patch('fxbex.portal.launch') as launch:

@@ -4,6 +4,21 @@ import re
 from inspect import getattr_static
 
 
+def scene_prompt(value, *labels):
+    if not isinstance(value, str) or len(value) > 4000:
+        return ''
+    value = value.strip()
+    words = re.findall(r'[^\W_]+', value.casefold())
+    compact = ''.join(words)
+    # Hub widgets often contain just a repository name or activation token.
+    if len(value.split()) < 2 or any(
+        compact == ''.join(re.findall(r'[^\W_]+', label.casefold()))
+        for label in labels if isinstance(label, str)
+    ):
+        return ''
+    return value
+
+
 def catalog(adapter):
     describe = getattr(adapter, 'lora_catalog', None) if getattr_static(adapter,'lora_catalog',None) is not None else None
     apply = getattr(adapter, 'apply_loras', None) if getattr_static(adapter,'apply_loras',None) is not None else None
@@ -32,7 +47,11 @@ def catalog(adapter):
         entry['trigger_words']=words
         prompt=row.get('example_prompt','')
         if not isinstance(prompt,str) or len(prompt)>4000:raise ValueError('Invalid LoRA example prompt')
-        entry['example_prompt']=prompt
+        entry['example_prompt']=scene_prompt(prompt,key,name,*words)
+        for field in ('source_repo','source_revision','source_file'):
+            value = row.get(field)
+            if isinstance(value, str) and 0 < len(value) <= 1024:
+                entry[field] = value
         url=row.get('source_url','')
         if not isinstance(url,str) or (url and not re.fullmatch(r'https://huggingface\.co/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',url)):
             raise ValueError('LoRA source must be a Hugging Face model URL')
