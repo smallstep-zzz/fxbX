@@ -13,6 +13,7 @@ from urllib.request import urlopen
 import zipfile
 
 from .hub import CATALOG, catalog_matches, resolve_package, _local_package
+from .lora import scene_prompt
 from .service import PackageService, WorkerRequestError
 from .settings import cache_root
 
@@ -66,6 +67,25 @@ def catalog_rows(doc):
                      'recommendations':[r for r in doc.get('_loras',{}).get('adapters',[]) if source in r.get('models',[])],
                      'published':web.get('published_on','') if same else release.get('published_at',model.get('published_at',''))})
     return rows
+
+
+def recommended_prompts(info, recommendations):
+    """Add reviewed prompt metadata without changing available LoRAs or scales."""
+    candidates = {
+        (row.get('repo'), row.get('revision'), row.get('filename')): row
+        for row in recommendations
+        if isinstance(row, dict) and all(
+            isinstance(row.get(field), str) and row[field]
+            for field in ('repo', 'revision', 'filename')
+        )
+    }
+    adapters = []
+    for row in info['adapters']:
+        identity = tuple(row.get(field) for field in ('source_repo', 'source_revision', 'source_file'))
+        reviewed = candidates.get(identity, {})
+        prompt = scene_prompt(reviewed.get('example_prompt'), reviewed.get('trigger'), row.get('name'))
+        adapters.append({**row, 'example_prompt': prompt} if prompt else row)
+    return {**info, 'adapters': adapters}
 
 
 class ModelManager:
@@ -147,6 +167,7 @@ class ModelManager:
                 self.service=service
             loaded=service.load(self.progress,loras=loras)
             config=loaded.get('web_config') or service.web('config')
+            config=self._with_recommended_prompts(config, identifier)
             with self.lock:
                 if self.closing:raise RuntimeError('Model manager closed')
                 self.config=config;self.phase='ready';self.error=''
@@ -160,16 +181,31 @@ class ModelManager:
     def progress(self,phase,label):
         with self.lock:self.phase='loading';self.error='';self.label=str(label)[:300]
 
+    def _recommendations(self, identifier):
+        return next(row.get('recommendations', []) for row in self.models if row['id'] == identifier)
+
+    def _with_recommended_prompts(self, config, identifier):
+        if 'lora' not in config:
+            return config
+        return {**config, 'lora': recommended_prompts(config['lora'], self._recommendations(identifier))}
+
     def call(self,method,*args,expected_key=None):
         with self.lock:
             if self.phase!='ready' or self.switching or self.service is None:raise ValueError('모델을 먼저 서빙하세요.')
             if expected_key and expected_key!=hashlib.sha256(self.current.encode()).hexdigest():raise ValueError('서빙 모델이 바뀌었습니다. 호출 샘플을 다시 생성하세요.')
-            service=self.service;self.busy+=1
+            service=self.service;identifier=self.current;self.busy+=1
         try:
             value=getattr(service,method)(*args)
-            if method=='web' and args[0] in ('loras','import'):
-                with self.lock:
-                    self.config['lora']=value if args[0]=='loras' else value['lora']
+            if method=='web':
+                operation = args[0]
+                if operation == 'config':
+                    value = self._with_recommended_prompts(value, identifier)
+                elif operation in ('loras', 'import'):
+                    info = value if operation == 'loras' else value['lora']
+                    info = recommended_prompts(info, self._recommendations(identifier))
+                    with self.lock:
+                        self.config['lora'] = info
+                    value = info if operation == 'loras' else {**value, 'lora': info}
             return value
         except WorkerRequestError as exc:
             if exc.fatal:

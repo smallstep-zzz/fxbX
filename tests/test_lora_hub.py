@@ -61,3 +61,13 @@ class HubLoraTest(TestCase):
         from huggingface_hub import ModelCardData
         self.info.card_data=ModelCardData(base_model='owner/base',license='apache-2.0')
         self.assertTrue(self.hub.search('owner/style')[0]['compatible'])
+
+    def test_skip_name_and_trigger_only_widgets(self):
+        self.info.card_data.update(trigger_words=['toy face'], widget=[
+            {'text':'owner/style'}, {'text':'Toy face'},
+            {'text':'Toy face, a smiling person in a blue studio'},
+        ])
+        self.assertEqual(self.hub._describe(self.info)['example_prompt'],
+                         'Toy face, a smiling person in a blue studio')
+        self.info.card_data['widget'].pop()
+        self.assertEqual(self.hub._describe(self.info)['example_prompt'], '')

@@ -57,7 +57,10 @@ class BoundLoras:
             if used!=set(reader.keys()):raise ValueError('Unbound LoRA tensors; partial application is forbidden')
 
     def catalog(self):
-        return [{k:r[k] for k in ('id','name','description','min_scale','max_scale','default_scale','trigger_words','example_prompt','source_url') if k in r} for r in self.rows]
+        fields = ('id', 'name', 'description', 'min_scale', 'max_scale', 'default_scale',
+                  'trigger_words', 'example_prompt', 'source_url', 'source_repo',
+                  'source_revision', 'source_file')
+        return [{key: row[key] for key in fields if key in row} for row in self.rows]
 
     def _weights(self,row):
         key=row['id']
