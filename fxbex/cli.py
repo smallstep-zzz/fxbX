@@ -1,5 +1,6 @@
 """CLI for local FXB_EX packages; SDK is imported only for runtime operations."""
 import argparse
+import contextlib
 import shutil
 import json
 from pathlib import Path
@@ -109,11 +110,11 @@ def _save_result(result, report_dir, output):
     return image_path
 
 
-def _runtime_call(callback, log_path, verbose=False):
+def _runtime_call(callback, log):
     """Keep framework diagnostics separate from answers and JSON results."""
-    if verbose:return callback()
-    import contextlib
-    with log_path.open('a') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+    if log is None:
+        return callback()
+    with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
         return callback()
 
 
@@ -140,7 +141,7 @@ def _load_with_progress(callback, stream, interval=5):
             print(file=stream, flush=True)
 
 
-def _main(argv=None):
+def _main(argv, resources):
     parser = argparse.ArgumentParser(
         prog='fxbx', description='Download, inspect and run compiled model packages.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -292,7 +293,6 @@ Run precompiled packages from a file or the model catalog.""")
         from .runtime import Session
         from .dependencies import MissingPackages, missing_import, offer_install
         # SDK/compiler diagnostics may print; keep JSON results on stdout.
-        import contextlib
         if args.action == 'predict' and not args.input:
             raise ValueError('--input JSON file is required for tensor prediction')
         progress_stream = sys.stderr
@@ -303,7 +303,10 @@ Run precompiled packages from a file or the model catalog.""")
                         allow_sdk_mismatch=args.allow_sdk_mismatch,report_warning=report_warning)
         log_path=session.report_dir/'runtime.log'
         print(f'Loading package; diagnostics: {log_path}',file=sys.stderr,flush=True)
-        def invoke(callback):return _runtime_call(callback,log_path,args.verbose)
+        # SDK loggers may retain the stream from load until worker shutdown.
+        log = None if args.verbose else resources.enter_context(log_path.open("a", buffering=1))
+        def invoke(callback):
+            return _runtime_call(callback, log)
         attempted = set()
         while True:
             try:
@@ -363,7 +366,8 @@ Run precompiled packages from a file or the model catalog.""")
 
 def main(argv=None):
     try:
-        return _main(argv) or 0
+        with contextlib.ExitStack() as resources:
+            return _main(argv, resources) or 0
     except Exception as exc:
         print(f'fxbx: {exc}', file=sys.stderr)
         return 1
