@@ -18,7 +18,7 @@ def _storage_span(shape, stride):
 def allocation_bytes(records):
     from .memory import tensor_bytes
     return sum(tensor_bytes({'shape':[_storage_span(r['shape'],r['stride'])],'dtype':r['dtype']})
-               for r in records if r['kind']=='allocation')
+               for r in records if r['kind'] in ('allocation','zero_tensor'))
 
 
 def validate_returns(entry, outputs, tensors, failure):
@@ -33,6 +33,27 @@ def validate_returns(entry, outputs, tensors, failure):
         if not isinstance(record, dict):
             failure('Invalid return value descriptor')
         kind = record.get('kind')
+        if kind=='writeback':
+            source,target=record.get('source'),record.get('target')
+            if (set(record)!={'kind','source','target'} or len(records)!=1
+                    or not isinstance(source,str) or not isinstance(target,str)
+                    or source not in outputs or target not in entry['inputs']
+                    or tensors[source]['kind']!='intermediate' or 'index_input_dtype' in tensors[target]
+                    or any(tensors[source][k]!=tensors[target][k] for k in ('shape','dtype','stride'))):
+                failure('Writeback requires one exact user buffer and one produced result')
+            referenced.add(source)
+            continue
+        if kind=='compact_indices':
+            source,count=record.get('source'),record.get('count')
+            if (set(record)!={'kind','source','count'} or not isinstance(source,str) or not isinstance(count,str)
+                    or source==count or source not in outputs or count not in outputs):
+                failure('Compact indices need declared coordinate and count outputs')
+            rows,length=tensors[source],tensors[count]
+            if (rows['dtype']!='int32' or length['dtype']!='int32' or length['shape']!=[]
+                    or len(rows['shape'])!=2 or rows['kind']!='intermediate' or length['kind']!='intermediate'):
+                failure('Compact indices need a signed int32 matrix and scalar count')
+            referenced.update((source,count))
+            continue
         if kind == 'scalar':
             if (set(record) != {'kind', 'value'} or type(record['value']) not in (bool, int)
                     or type(record['value']) is int and not -(1 << 63) <= record['value'] < 1 << 63):
@@ -47,7 +68,7 @@ def validate_returns(entry, outputs, tensors, failure):
                 failure('Index widening needs a signed int32 source')
             referenced.add(record['source'])
             continue
-        if kind not in ('view', 'allocation'):
+        if kind not in ('view','allocation','zero_tensor'):
             failure('Unknown return value kind')
         fields = {'kind','shape','stride'} | ({'source','offset'} if kind == 'view' else {'dtype'})
         shape, stride = record.get('shape'), record.get('stride')
@@ -56,7 +77,7 @@ def validate_returns(entry, outputs, tensors, failure):
                 or any(type(n) is not int or not 0 <= n < 2**31 for n in (*shape,*stride))):
             failure('Return value needs exact bounded shape and stride')
         span = _storage_span(shape,stride)
-        if kind == 'allocation':
+        if kind in ('allocation','zero_tensor'):
             dtype = record['dtype']
             if not isinstance(dtype,str):
                 failure('Return allocation needs a dtype')
@@ -83,13 +104,13 @@ def validate_returns(entry, outputs, tensors, failure):
         failure('Return descriptors must cover the declared entry outputs')
 
 
-def assemble_returns(records, bases, torch, device):
+def assemble_returns(records, bases, torch, device, *, inputs=None):
     result = []
     for record in records:
         kind = record['kind']
         if kind == 'scalar':
             value = record['value']
-        elif kind == 'allocation':
+        elif kind in ('allocation','zero_tensor'):
             # ATen empty leaves values unspecified. Initialise the entire
             # backing span before returning memory to an external caller.
             span = _storage_span(record['shape'],record['stride'])
@@ -104,5 +125,16 @@ def assemble_returns(records, bases, torch, device):
                 value = value.cpu().item()
             elif kind == 'index64':
                 value = value.to(torch.int64)
+            elif kind=='writeback':
+                out=inputs[record['target']]
+                out.copy_(value)
+                value=out
+            elif kind=='compact_indices':
+                from .execution_fxb import ExecutionPlanError
+
+                count=bases[record['count']].item()
+                if not 0<=count<=value.shape[0]:
+                    raise ExecutionPlanError('Native compact result count is outside the declared capacity')
+                value=value[:count].to(torch.int64)
         result.append(value)
     return tuple(result)

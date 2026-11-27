@@ -384,6 +384,9 @@ class ExecutionFXB:
     supports_frozen_buffer_guards=True
     supports_checked_int64_indices=True
     supports_output_boundaries=True
+    supports_output_writeback=True
+    supports_compact_index_outputs=True
+    supports_zeroed_output_returns=True
     def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
@@ -772,9 +775,11 @@ class ExecutionFXB:
             if state is not None:self._check_state(state)
             self.memory=self._admit_requests(len(self._requests),output_device,default_present=self._default_ready or state is None)
             recipe=self.plan['entries'][entry]
+            return_values=recipe.get('return_values')
+            writeback=next((r for r in return_values or () if r['kind']=='writeback'),None)
             if (output_device!='cpu'
-                    and any(r['kind']=='index64' for r in recipe.get('return_values',()))):
-                raise ExecutionPlanError('Widened index outputs require CPU return')
+                    and any(r['kind'] in ('index64','writeback','compact_indices') for r in return_values or ())):
+                raise ExecutionPlanError('Widened index, compact index and writeback outputs require CPU return')
             if isinstance(inputs,dict):
                 if set(inputs)!=set(recipe['inputs']):raise ExecutionPlanError('Entry input names differ')
                 values=inputs
@@ -783,7 +788,15 @@ class ExecutionFXB:
             values={name:_entry_input(value,self.plan['tensors'][name],self.torch,name)
                     for name,value in values.items()}
             from .output_boundaries import assemble_returns
-            return_values=recipe.get('return_values')
+            if writeback is not None:
+                name=writeback['target'];target=values[name]
+                if target.device.type!='cpu' or target.requires_grad or not target.is_contiguous():
+                    raise ExecutionPlanError('Writeback requires a contiguous CPU buffer without gradients')
+                storage=target.untyped_storage().data_ptr()
+                for other,value in values.items():
+                    if (other!=name and value.device.type=='cpu' and value.numel()
+                            and value.untyped_storage().data_ptr()==storage and value is not target):
+                        raise ExecutionPlanError('Writeback refuses overlapping storage in distinct inputs')
             if self.metadata_only:
                 if output_device!='cpu':
                     raise ExecutionPlanError('Metadata-only packages currently return CPU values')
@@ -835,14 +848,15 @@ class ExecutionFXB:
                     output=tuple(tensors[n].cpu() if output_device=='cpu' else
                                  tensors[n].clone() if n in persistent_outputs else tensors[n]
                                  for n in recipe['outputs'])
+                    if writeback is not None:self._sync()
                     if return_values is not None:
                         bases=dict(zip(recipe['outputs'],output))
                         if output_device=='cpu':
                             bases.update({n:values[n] for n in bases.keys() & values.keys()
                                           if values[n].device.type=='cpu'})
                         output=assemble_returns(return_values,bases,self.torch,
-                                                'cpu' if output_device=='cpu' else self.device)
-                    self._sync()
+                                                'cpu' if output_device=='cpu' else self.device,inputs=values)
+                    if writeback is None:self._sync()
                     committed={**active,**{slot:tensors[value] for slot,value in recipe['state_updates'].items()}}
                     if state is None:self.states=committed
                     else:state._tensors=committed

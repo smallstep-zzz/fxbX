@@ -32,3 +32,35 @@ class OutputBoundarySafety(unittest.TestCase):
         (result,)=assemble_returns([record],{},torch,'cpu')
         self.assertEqual(result.stride(),(3,1))
         self.assertEqual(result.as_strided((5,),(1,)).tolist(),[0.]*5)
+
+    def test_writeback_has_exact_user_destination_and_returns_its_identity(self):
+        import torch
+
+        def fail(message):
+            raise ValueError(message)
+
+        record={'kind':'writeback','source':'y','target':'out'}
+        entry={'inputs':['out'],'return_values':[record]}
+        spec={'shape':[2],'stride':[1],'dtype':'float32'}
+        tensors={'out':spec | {'kind':'user_input'},'y':spec | {'kind':'intermediate'}}
+        validate_returns(entry,['y'],tensors,fail)
+        with self.assertRaisesRegex(ValueError,'exact user buffer'):
+            validate_returns(entry | {'inputs':[]},['y'],tensors,fail)
+        out=torch.zeros(2)
+        (value,)=assemble_returns([record],{'y':torch.ones(2)},torch,'cpu',inputs={'out':out})
+        self.assertIs(value,out)
+        self.assertEqual(out.tolist(),[1.,1.])
+
+    def test_compact_count_is_checked_before_trimming(self):
+        import torch
+
+        from fxbex.execution_fxb import ExecutionPlanError
+
+        descriptor={'kind':'compact_indices','source':'rows','count':'count'}
+        rows=torch.tensor([[1,3],[2,5]],dtype=torch.int32)
+        (selected,)=assemble_returns([descriptor],{'rows':rows,'count':torch.tensor(1,dtype=torch.int32)},
+                                     torch,'cpu')
+        self.assertEqual(selected.dtype,torch.int64)
+        self.assertEqual(selected.tolist(),[[1,3]])
+        with self.assertRaisesRegex(ExecutionPlanError,'outside the declared capacity'):
+            assemble_returns([descriptor],{'rows':rows,'count':torch.tensor(3,dtype=torch.int32)},torch,'cpu')
