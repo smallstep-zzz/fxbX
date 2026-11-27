@@ -771,7 +771,9 @@ class ExecutionFXB:
                         del result,value
                         for name in release:
                             tensors.pop(name, None)
-                    persistent_outputs=set(self.resident)|set(active)|set(recipe['state_updates'].values())|_zero_input_outputs(recipe)|set(folded)
+                    # CPU copies already own their storage; only NPU outputs need alias protection.
+                    persistent_outputs=(set(self.resident)|set(active)|set(recipe['state_updates'].values())|_zero_input_outputs(recipe)|set(folded)
+                                        if output_device=='furiosa' else set())
                     output=tuple(tensors[n].cpu() if output_device=='cpu' else
                                  tensors[n].clone() if n in persistent_outputs else tensors[n]
                                  for n in recipe['outputs'])
