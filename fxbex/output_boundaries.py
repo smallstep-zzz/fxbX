@@ -90,8 +90,12 @@ def assemble_returns(records, bases, torch, device):
         if kind == 'scalar':
             value = record['value']
         elif kind == 'allocation':
-            value = torch.empty_strided(record['shape'], record['stride'],
-                                        dtype=getattr(torch,record['dtype'].removeprefix('torch.')), device=device)
+            # ATen empty leaves values unspecified. Initialise the entire
+            # backing span before returning memory to an external caller.
+            span = _storage_span(record['shape'],record['stride'])
+            storage = torch.zeros((span,),
+                                  dtype=getattr(torch,record['dtype'].removeprefix('torch.')), device=device)
+            value = storage.as_strided(record['shape'],record['stride'])
         else:
             value = bases[record['source']]
             if kind == 'view':

@@ -1,6 +1,6 @@
 import unittest
 
-from fxbex.output_boundaries import validate_returns
+from fxbex.output_boundaries import assemble_returns, validate_returns
 
 
 class OutputBoundarySafety(unittest.TestCase):
@@ -24,3 +24,11 @@ class OutputBoundarySafety(unittest.TestCase):
                        {'kind':'index64','source':'x'}):
             with self.subTest(record=record),self.assertRaises(ValueError):
                 self.validate(record)
+
+    def test_allocation_keeps_layout_with_known_backing_bytes(self):
+        import torch
+
+        record={'kind':'allocation','shape':[2,2],'stride':[3,1],'dtype':'float32'}
+        (result,)=assemble_returns([record],{},torch,'cpu')
+        self.assertEqual(result.stride(),(3,1))
+        self.assertEqual(result.as_strided((5,),(1,)).tolist(),[0.]*5)
