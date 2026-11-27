@@ -99,6 +99,23 @@ def _check_value_range(value,spec,torch):
             raise ExecutionPlanError('Tensor values are outside the declared value_range')
 
 
+def _entry_input(value, spec, torch, name):
+    index_dtype = spec.get('index_input_dtype')
+    logical = dict(spec, dtype=index_dtype) if index_dtype else spec
+    if not _tensor_matches(value, logical, torch) or value.requires_grad:
+        raise ExecutionPlanError('Entry input metadata mismatch: '+name)
+    if index_dtype:
+        if value.device.type != 'cpu':
+            raise ExecutionPlanError('Checked int64 indices must be CPU tensors')
+        with torch.no_grad():
+            # Check and cast the same private snapshot in the original width.
+            value = value.clone()
+            _check_value_range(value, spec, torch)
+            return value.to(dtype=torch.int32)
+    _check_value_range(value, spec, torch)
+    return value
+
+
 def _memory_gate(plan,*,clone_persistent_outputs=False):
     from .memory import tensor_bytes,check_budget
     specs=plan['tensors'];sizes={n:tensor_bytes(s) for n,s in specs.items()}
@@ -150,13 +167,14 @@ def validate_execution_plan(plan, *, archived=False):
         from .memory import tensor_bytes
         if tensor_bytes(value) is None:fail('Unknown tensor dtype')
     schema=plan.get('schema')
-    if schema not in ('tclmachine.execution-plan.v1','tclmachine.execution-plan.v2'):
+    if schema not in ('tclmachine.execution-plan.v1','tclmachine.execution-plan.v2','tclmachine.execution-plan.v3'):
         fail('Unsupported execution plan schema')
     if schema=='tclmachine.execution-plan.v1' and 'frozen_buffer_guards' in plan:
         fail('Frozen buffer guards require execution plan schema v2')
     guards=plan.get('frozen_buffer_guards')
-    if schema=='tclmachine.execution-plan.v2' and (not isinstance(guards,list) or not guards):
-        fail('Execution plan schema v2 requires nonempty frozen_buffer_guards')
+    if (schema=='tclmachine.execution-plan.v2' or 'frozen_buffer_guards' in plan) and (
+            not isinstance(guards,list) or not guards):
+        fail('Frozen buffer guards must be a nonempty list when declared or required by schema v2')
     if not isinstance(plan.get('source_metadata'),dict) or not identifier(plan['source_metadata'].get('architecture')):
         fail('Actual source architecture is required')
     if plan.get('device_config')!={'fusion':8,'mesh':'single'} or type(plan['device_config']['fusion'])!=int:fail('Only fusion8/Single is qualified')
@@ -190,6 +208,10 @@ def validate_execution_plan(plan, *, archived=False):
                     or any(type(bounds[k])!=int for k in ('min','max_exclusive'))
                     or not -(2**31)<=bounds['min']<bounds['max_exclusive']<=2**31):
                 fail('value_range requires external int32 tensor and exact signed-i32 min/max_exclusive bounds')
+        if 'index_input_dtype' in value and (
+                schema != 'tclmachine.execution-plan.v3' or kind != 'user_input'
+                or value['index_input_dtype'] != 'int64' or 'value_range' not in value):
+            fail('Checked int64 indices require schema v3 and a range-guarded int32 user input')
         if kind=='state' and value.get('initial')!='zeros':fail('Only explicit zero-initialized state is supported')
         if kind=='state':
             stride=[];width=1
@@ -252,6 +274,7 @@ def validate_execution_plan(plan, *, archived=False):
             signature[key]=logical;available.update(out);produced.update(out)
         outputs=refs(entry.get('outputs'),'Entry outputs',True)
         if not outputs or any(x not in available for x in outputs):fail('Entry outputs must be available tensors')
+        if any('index_input_dtype' in tensors[x] for x in outputs):fail('Checked index input cannot be an entry output')
         updates=entry.get('state_updates')
         if not isinstance(updates,dict):fail('Entry needs explicit state_updates mapping')
         for target,value in updates.items():
@@ -342,6 +365,7 @@ class ExecutionFXB:
     """Exclusive fixed-shape tensor-plan session; state and temporaries stay on NPU."""
     supports_zero_input_kernels=True
     supports_frozen_buffer_guards=True
+    supports_checked_int64_indices=True
     def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
@@ -725,10 +749,8 @@ class ExecutionFXB:
                 values=inputs
             elif isinstance(inputs,(list,tuple)) and len(inputs)==len(recipe['inputs']):values=dict(zip(recipe['inputs'],inputs))
             else:raise ExecutionPlanError('Entry input arity mismatch')
-            for name,value in values.items():
-                if not _tensor_matches(value,self.plan['tensors'][name],self.torch) or value.requires_grad:
-                    raise ExecutionPlanError('Entry input metadata mismatch: '+name)
-                _check_value_range(value,self.plan['tensors'][name],self.torch)
+            values={name:_entry_input(value,self.plan['tensors'][name],self.torch,name)
+                    for name,value in values.items()}
             if state is not None:state._borrowed=True
             try:
                 with self.torch.no_grad():

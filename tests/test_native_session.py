@@ -7,6 +7,45 @@ import torch
 from safetensors.torch import save_file,load_file
 from fxbex.native_session import NativeSession
 from fxbex.web_demo import WebDemo
+from fxbex.execution_fxb import _entry_input, ExecutionPlanError, validate_execution_plan
+
+
+class CheckedIndexTest(TestCase):
+    def test_narrowing_requires_versioned_external_input_contract(self):
+        index = {'kind': 'user_input', 'shape': [2], 'stride': [1], 'dtype': 'int32',
+                 'index_input_dtype': 'int64', 'value_range': {'min': 0, 'max_exclusive': 8}}
+        plan = {
+            'schema': 'tclmachine.execution-plan.v3',
+            'source_metadata': {'architecture': 'Fixture'},
+            'compatibility': dict.fromkeys(('torch', 'furiosa-torch', 'furiosa-tcc'), 'fixture'),
+            'compiler_identity': {'version': 'fixture', 'revision': 'fixture'},
+            'device_config': {'fusion': 8, 'mesh': 'single'},
+            'tensors': {'ids': index, 'y': {'kind': 'intermediate', 'shape': [2],
+                                           'stride': [1], 'dtype': 'float32'}},
+            'kernels': {'lookup': {'edf_path': 'fixture.edf', 'edf_sha256': '0' * 64,
+                                   'expected_num_fusion': 8, 'abi': {'inputs': ['i32'], 'outputs': ['f32']}}},
+            'entries': {'forward': {'inputs': ['ids'], 'outputs': ['y'], 'state_updates': {},
+                                    'steps': [{'kernel': 'lookup', 'inputs': ['ids'], 'outputs': ['y']}]}},
+        }
+        validate_execution_plan(plan)
+        with self.assertRaisesRegex(ExecutionPlanError, 'require schema v3'):
+            validate_execution_plan(dict(plan, schema='tclmachine.execution-plan.v1'))
+        for field, value in (('kind', 'state'), ('index_input_dtype', 'float32')):
+            with self.subTest(field=field), self.assertRaises(ExecutionPlanError):
+                validate_execution_plan(dict(plan, tensors=plan['tensors'] | {'ids': dict(index, **{field: value})}))
+
+    def test_original_width_is_checked_before_narrowing(self):
+        spec = {'shape': [2], 'stride': [1], 'dtype': 'int32',
+                'index_input_dtype': 'int64', 'value_range': {'min': 0, 'max_exclusive': 8}}
+        ids = torch.tensor([0, 7], dtype=torch.int64)
+        result = _entry_input(ids, spec, torch, 'ids')
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertEqual(result.tolist(), ids.tolist())
+        for bad in (-2**63, -1, 8, 2**32 + 1, 2**63 - 1):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ExecutionPlanError, 'value_range'):
+                _entry_input(torch.tensor([0, bad], dtype=torch.int64), spec, torch, 'ids')
+        with self.assertRaisesRegex(ExecutionPlanError, 'metadata'):
+            _entry_input(ids.int(), spec, torch, 'ids')
 
 class NativeTransportTest(TestCase):
     def setUp(self):
