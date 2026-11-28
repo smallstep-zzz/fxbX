@@ -65,6 +65,18 @@ class OutputBoundarySafety(unittest.TestCase):
         with self.assertRaisesRegex(ExecutionPlanError,'outside the declared capacity'):
             assemble_returns([descriptor],{'rows':rows,'count':torch.tensor(3,dtype=torch.int32)},torch,'cpu')
 
+    def test_index64_view_widens_then_applies_the_exact_view(self):
+        import torch
+
+        record={'kind':'index64_view','source':'x','shape':[3,2],'stride':[1,3],'offset':0}
+        with self.assertRaisesRegex(ValueError,'signed int32 source'):
+            self.validate(record)
+        base=torch.arange(6,dtype=torch.int32).reshape(2,3)
+        (value,)=assemble_returns([record],{'x':base},torch,'cpu')
+        self.assertEqual(value.dtype,torch.int64)
+        self.assertEqual(value.stride(),(1,3))
+        self.assertEqual(value.tolist(),base.t().tolist())
+
     def test_complex_view_reuses_interleaved_storage(self):
         import torch
 

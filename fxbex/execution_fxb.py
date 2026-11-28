@@ -402,6 +402,7 @@ class ExecutionFXB:
     supports_zeroed_output_returns=True
     supports_complex_views=True
     supports_packed_int64_words=True
+    supports_index64_views=True
     def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
@@ -793,7 +794,7 @@ class ExecutionFXB:
             return_values=recipe.get('return_values')
             writeback=next((r for r in return_values or () if r['kind']=='writeback'),None)
             if (output_device!='cpu'
-                    and any(r['kind'] in ('index64','writeback','compact_indices','complex_view','packed_int64')
+                    and any(r['kind'] in ('index64','index64_view','writeback','compact_indices','complex_view','packed_int64')
                             for r in return_values or ())):
                 raise ExecutionPlanError('Converted tensor and writeback outputs require CPU return')
             if isinstance(inputs,dict):

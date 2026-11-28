@@ -87,9 +87,9 @@ def validate_returns(entry, outputs, tensors, failure):
                 failure('Index widening needs a signed int32 source')
             referenced.add(record['source'])
             continue
-        if kind not in ('view','allocation','zero_tensor'):
+        if kind not in ('view','index64_view','allocation','zero_tensor'):
             failure('Unknown return value kind')
-        fields = {'kind','shape','stride'} | ({'source','offset'} if kind == 'view' else {'dtype'})
+        fields = {'kind','shape','stride'} | ({'source','offset'} if kind in ('view','index64_view') else {'dtype'})
         shape, stride = record.get('shape'), record.get('stride')
         if (set(record) != fields or not isinstance(shape,list) or not isinstance(stride,list)
                 or len(shape) != len(stride) or len(shape) > MAX_RANK
@@ -111,6 +111,8 @@ def validate_returns(entry, outputs, tensors, failure):
             if not isinstance(source,str) or source not in outputs or type(offset) is not int or offset < 0:
                 failure('View needs a declared source and nonnegative offset')
             base = tensors[source]
+            if kind == 'index64_view' and base['dtype'] != 'int32':
+                failure('Index widening needs a signed int32 source')
             dense = 1
             for n,s in zip(reversed(base['shape']),reversed(base['stride'])):
                 if n > 1 and s != dense:
@@ -138,7 +140,9 @@ def assemble_returns(records, bases, torch, device, *, inputs=None):
             value = storage.as_strided(record['shape'],record['stride'])
         else:
             value = bases[record['source']]
-            if kind == 'view':
+            if kind == 'index64_view':
+                value = value.to(torch.int64)  # widen the dense base, then apply the exact view
+            if kind in ('view','index64_view'):
                 value = value.as_strided(record['shape'],record['stride'],value.storage_offset()+record['offset'])
             elif kind == 'item':
                 value = value.cpu().item()
