@@ -54,6 +54,25 @@ def validate_returns(entry, outputs, tensors, failure):
                 failure('Compact indices need a signed int32 matrix and scalar count')
             referenced.update((source,count))
             continue
+        if kind=='complex_view':
+            source=record.get('source')
+            if set(record)!={'kind','source'} or not isinstance(source,str) or source not in outputs:
+                failure('Complex return needs a declared real-imaginary tensor')
+            spec=tensors[source]
+            if (spec['dtype']!='float32' or not spec['shape'] or spec['shape'][-1]!=2
+                    or spec['stride'][-1]!=1 or any(n%2 for n in spec['stride'][:-1])):
+                failure('Complex return requires interleaved FP32 real and imaginary lanes')
+            referenced.add(source)
+            continue
+        if kind=='packed_int64':
+            source=record.get('source')
+            if set(record)!={'kind','source'} or not isinstance(source,str) or source not in outputs:
+                failure('Packed int64 output must name a declared result')
+            spec=tensors[source]
+            if spec['kind']!='intermediate' or not is_int64_word_layout(spec):
+                failure('Packed int64 needs a dense two-word int32 tensor')
+            referenced.add(source)
+            continue
         if kind == 'scalar':
             if (set(record) != {'kind', 'value'} or type(record['value']) not in (bool, int)
                     or type(record['value']) is int and not -(1 << 63) <= record['value'] < 1 << 63):
@@ -136,5 +155,15 @@ def assemble_returns(records, bases, torch, device, *, inputs=None):
                 if not 0<=count<=value.shape[0]:
                     raise ExecutionPlanError('Native compact result count is outside the declared capacity')
                 value=value[:count].to(torch.int64)
+            elif kind=='complex_view':
+                value=torch.view_as_complex(value)
+            elif kind=='packed_int64':
+                value=value.view(torch.int64).squeeze(-1)
         result.append(value)
     return tuple(result)
+
+
+def is_int64_word_layout(spec):
+    shape,stride=spec['shape'],spec['stride']
+    return (spec['dtype']=='int32' and len(shape)>=2 and shape[-1]==2
+            and tuple(stride)==tuple(prod(shape[i+1:]) for i in range(len(shape))))

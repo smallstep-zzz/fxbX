@@ -100,6 +100,14 @@ def _check_value_range(value,spec,torch):
 
 
 def _entry_input(value, spec, torch, name):
+    if spec.get('packed_int64_input'):
+        import sys
+
+        original={'shape':spec['shape'][:-1],'stride':[s//2 for s in spec['stride'][:-1]],'dtype':'int64'}
+        if (sys.byteorder!='little' or not _tensor_matches(value,original,torch)
+                or value.device.type!='cpu' or value.requires_grad):
+            raise ExecutionPlanError('Packed int64 input needs an exact contiguous little-endian CPU tensor: '+name)
+        return value.view(torch.int32).reshape(spec['shape'])
     index_dtype = spec.get('index_input_dtype')
     logical = dict(spec, dtype=index_dtype) if index_dtype else spec
     if not _tensor_matches(value, logical, torch) or value.requires_grad:
@@ -168,7 +176,7 @@ def validate_execution_plan(plan, *, archived=False):
                 or not identifier(value.get('dtype'))):fail('Tensor requires concrete shape/dtype/stride')
         from .memory import tensor_bytes
         if tensor_bytes(value) is None:fail('Unknown tensor dtype')
-    from .output_boundaries import SCHEMA as output_schema, is_metadata_only, validate_returns
+    from .output_boundaries import SCHEMA as output_schema, is_metadata_only, validate_returns, is_int64_word_layout
     schema=plan.get('schema')
     has_returns = schema == output_schema
     metadata_only = is_metadata_only(plan)
@@ -201,6 +209,10 @@ def validate_execution_plan(plan, *, archived=False):
         spec(value);kind=value.get('kind')
         if kind not in ('user_input','parameter','buffer','state','intermediate'):fail('Unsupported tensor kind')
         if metadata_only and kind != 'user_input':fail('Metadata-only plans may reference request inputs only')
+        if 'packed_int64_input' in value and (not has_returns or kind!='user_input'
+                or value['packed_int64_input'] is not True or not is_int64_word_layout(value)
+                or 'index_input_dtype' in value or 'value_range' in value):
+            fail('Packed int64 inputs require a dense two-word user tensor in schema v4')
         if kind in ('parameter','buffer') and not identifier(value.get('target')):fail('External state_dict target is required')
         if 'checkpoint_slice' in value:
             bounds=value['checkpoint_slice']
@@ -285,7 +297,8 @@ def validate_execution_plan(plan, *, archived=False):
         outputs=refs(entry.get('outputs'),'Entry outputs',True)
         if (not outputs and not has_returns or any(x not in available for x in outputs)):
             fail('Entry outputs must be available tensors')
-        if any('index_input_dtype' in tensors[x] for x in outputs):fail('Checked index input cannot be an entry output')
+        if any('index_input_dtype' in tensors[x] or 'packed_int64_input' in tensors[x] for x in outputs):
+            fail('Narrowed or packed input cannot be an entry output')
         if has_returns:
             validate_returns(entry, outputs, tensors, fail)
         elif 'return_values' in entry:
@@ -387,6 +400,8 @@ class ExecutionFXB:
     supports_output_writeback=True
     supports_compact_index_outputs=True
     supports_zeroed_output_returns=True
+    supports_complex_views=True
+    supports_packed_int64_words=True
     def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
@@ -778,8 +793,9 @@ class ExecutionFXB:
             return_values=recipe.get('return_values')
             writeback=next((r for r in return_values or () if r['kind']=='writeback'),None)
             if (output_device!='cpu'
-                    and any(r['kind'] in ('index64','writeback','compact_indices') for r in return_values or ())):
-                raise ExecutionPlanError('Widened index, compact index and writeback outputs require CPU return')
+                    and any(r['kind'] in ('index64','writeback','compact_indices','complex_view','packed_int64')
+                            for r in return_values or ())):
+                raise ExecutionPlanError('Converted tensor and writeback outputs require CPU return')
             if isinstance(inputs,dict):
                 if set(inputs)!=set(recipe['inputs']):raise ExecutionPlanError('Entry input names differ')
                 values=inputs

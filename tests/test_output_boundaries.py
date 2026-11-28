@@ -64,3 +64,14 @@ class OutputBoundarySafety(unittest.TestCase):
         self.assertEqual(selected.tolist(),[[1,3]])
         with self.assertRaisesRegex(ExecutionPlanError,'outside the declared capacity'):
             assemble_returns([descriptor],{'rows':rows,'count':torch.tensor(3,dtype=torch.int32)},torch,'cpu')
+
+    def test_complex_view_reuses_interleaved_storage(self):
+        import torch
+
+        record={'kind':'complex_view','source':'x'}
+        tensor=torch.tensor([[1.,2.],[3.,4.]])
+        (value,)=assemble_returns([record],{'x':tensor},torch,'cpu')
+        self.assertEqual(value.tolist(),[1+2j,3+4j])
+        self.assertEqual(value.data_ptr(),tensor.data_ptr())
+        with self.assertRaisesRegex(ValueError,'real and imaginary lanes'):
+            self.validate(record)
