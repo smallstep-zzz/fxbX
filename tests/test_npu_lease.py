@@ -26,7 +26,8 @@ class Lease(unittest.TestCase):
                  patch('fxbex.runtime.extract', return_value=nullcontext(root)), \
                  patch('fxbex.runtime.check_compatibility'), patch('fxbex.validation.preflight'), \
                  patch('fxbex.memory.analyze', return_value={}), patch('fxbex.execution.MemoryTelemetry'), \
-                 patch('fxbex.bundled.activate', return_value=nullcontext(adapter)):
+                 patch('fxbex.bundled.activate', return_value=nullcontext(adapter)), \
+                 patch('fxbex.runtime.apply_device_policy') as policy:
                 os.environ.pop('FXBEX_NPU_LOCK_FD', None)
                 for fail in (False, True):
                     session = Session('unused', report_dir=root/'reports')
@@ -42,6 +43,7 @@ class Lease(unittest.TestCase):
                                     self.fail('a second owner should not acquire the device')
                     with npu_lock():
                         pass
+                self.assertEqual(policy.call_count, 2)
 
     def test_inherited_descriptor_is_validated_and_parent_remains_locked(self):
         with tempfile.TemporaryDirectory() as directory:
