@@ -77,6 +77,15 @@ def check_compatibility(manifest, *, allow_sdk_mismatch=False, report_warning=No
     if specification(manifest) is None:resolve_adapter(manifest['runtime']['adapter'])
 
 
+def apply_device_policy():
+    """The RNGD policy every package is checked against: no CPU fallback, fusion8, single mesh."""
+    from furiosa.torch import set_fusion,set_mesh_kind,MeshKind
+    from furiosa.torch.config import set_cpu_fallback,get_cpu_fallback
+    set_cpu_fallback(False)
+    if get_cpu_fallback():raise RuntimeError('Cannot disable CPU fallback')
+    set_fusion(8);set_mesh_kind(MeshKind.Single())
+
+
 class Session:
     def __init__(self, path, *, report_dir=None, weights_dir=None,
                  allow_sdk_mismatch=False, report_warning=None):
@@ -116,6 +125,8 @@ class Session:
             kind = self.manifest['runtime']['adapter']
             from .bundled import activate
             bundled = self.stack.enter_context(activate(self.root,self.manifest))
+            # Bundled adapters get the same device policy that built-in plans set for themselves.
+            if bundled is not None:apply_device_policy()
             adapter = bundled or resolve_adapter(kind)
             with delegate_npu_lock(lease) if bundled is not None else nullcontext():
                 if kind=='runnable_dag':
