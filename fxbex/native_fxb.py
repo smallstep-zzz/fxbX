@@ -54,7 +54,7 @@ def _name(name):
     return name
 
 
-def _contract(manifest):
+def _contract(manifest, *, allow_metadata_only=False):
     required = {'format_version', 'uuid', 'created_at', 'versions', 'model',
                 'parallel_config', 'kernels'}
     if (not isinstance(manifest, dict) or not required.issubset(manifest)
@@ -63,7 +63,7 @@ def _contract(manifest):
     if not isinstance(manifest['model'], dict) or not manifest['model'].get('architecture'):
         raise NativeFXBError('Native manifest must preserve its real architecture fingerprint')
     kernels = manifest['kernels']
-    if not isinstance(kernels, dict) or not kernels:
+    if not isinstance(kernels, dict) or not kernels and not allow_metadata_only:
         raise NativeFXBError('Native manifest has no kernels')
     files, count = set(), 0
     for entries in kernels.values():
@@ -123,16 +123,24 @@ def validate_native(path, *, verify_official=True):
             if members['manifest.json'].file_size > MAX_JSON_SIZE:
                 raise NativeFXBError('Native JSON exceeds size limit')
             manifest = _json(archive.read('manifest.json'))
-            files, count = _contract(manifest)
-            expected = files | {'manifest.json'}
             producer = None
             if PRODUCER_MEMBER in members:
-                expected.add(PRODUCER_MEMBER)
                 if members[PRODUCER_MEMBER].file_size > MAX_PRODUCER_SIZE:
                     raise NativeFXBError('Native JSON exceeds size limit')
                 producer = _producer_json(archive.read(PRODUCER_MEMBER))
+            from .output_boundaries import is_metadata_only
+            plan = producer.get('execution_plan') if isinstance(producer, dict) else None
+            metadata_only = is_metadata_only(plan)
+            if metadata_only:
+                from .execution_fxb import validate_execution_plan
+                validate_execution_plan(plan,archived=True)
+                if path.suffix!='.fxbx' or not isinstance(manifest,dict) or manifest.get('kernels')!={}:
+                    raise NativeFXBError('Metadata-only archives need .fxbx and no native kernels')
+            files, count = _contract(manifest,allow_metadata_only=metadata_only)
+            expected = files | {'manifest.json'}
+            if producer is not None:
+                expected.add(PRODUCER_MEMBER)
                 # An execution plan bound to an original checkpoint may ship its derived buffers.
-                plan = producer.get('execution_plan') if isinstance(producer, dict) else None
                 extra = ((plan or {}).get('source_metadata') or {}).get('checkpoint') or {}
                 extra = (extra.get('package_tensors') or {}).get('member') if isinstance(extra, dict) else None
                 if isinstance(extra, str) and extra.startswith('checkpoint/') and extra.endswith('.safetensors'):
@@ -163,11 +171,11 @@ def validate_native(path, *, verify_official=True):
                 raise NativeFXBError(f'Native archive CRC mismatch: {bad}')
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError) as exc:
         raise NativeFXBError(f'Invalid native archive: {exc}') from exc
-    if verify_official:
+    if verify_official and not metadata_only:
         _official(path)
-    reader = 'passed' if verify_official else 'not_run'
+    reader = 'not_applicable' if metadata_only else 'passed' if verify_official else 'not_run'
     return {'schema': 'fxbex.native-fxb.validation.v1', 'path': str(path),
-            'format': 'FXB', 'format_version': 2, 'weightless': True,
+            'format': 'FXBX' if metadata_only else 'FXB', 'format_version': 2, 'weightless': True,
             'kernel_entries': count, 'edf_files': len(files), 'producer_metadata': producer,
             'gates': {'archive': 'passed', 'official_show': reader, 'official_inspect': reader,
                       'internal_metadata_reader': reader if producer else 'not_applicable',

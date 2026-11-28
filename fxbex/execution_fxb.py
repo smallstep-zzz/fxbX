@@ -100,6 +100,14 @@ def _check_value_range(value,spec,torch):
 
 
 def _entry_input(value, spec, torch, name):
+    if spec.get('packed_int64_input'):
+        import sys
+
+        original={'shape':spec['shape'][:-1],'stride':[s//2 for s in spec['stride'][:-1]],'dtype':'int64'}
+        if (sys.byteorder!='little' or not _tensor_matches(value,original,torch)
+                or value.device.type!='cpu' or value.requires_grad):
+            raise ExecutionPlanError('Packed int64 input needs an exact contiguous little-endian CPU tensor: '+name)
+        return value.view(torch.int32).reshape(spec['shape'])
     index_dtype = spec.get('index_input_dtype')
     logical = dict(spec, dtype=index_dtype) if index_dtype else spec
     if not _tensor_matches(value, logical, torch) or value.requires_grad:
@@ -140,9 +148,11 @@ def _memory_gate(plan,*,clone_persistent_outputs=False):
                     live.remove(name)
                     live_bytes -= sizes[name]
         if clone_persistent_outputs:
+            from .output_boundaries import allocation_bytes
             exported_aliases = persistent | set(entry['state_updates'].values())
             peak = max(peak, live_bytes + sum(sizes[name] for name in entry['outputs']
-                                             if name in exported_aliases))
+                                             if name in exported_aliases)
+                       + allocation_bytes(entry.get('return_values',())))
     try:return check_budget(peak,plan.get('memory_policy'))
     except ValueError as exc:raise ExecutionPlanError(str(exc)) from exc
 
@@ -166,8 +176,12 @@ def validate_execution_plan(plan, *, archived=False):
                 or not identifier(value.get('dtype'))):fail('Tensor requires concrete shape/dtype/stride')
         from .memory import tensor_bytes
         if tensor_bytes(value) is None:fail('Unknown tensor dtype')
+    from .output_boundaries import SCHEMA as output_schema, is_metadata_only, validate_returns, is_int64_word_layout
     schema=plan.get('schema')
-    if schema not in ('tclmachine.execution-plan.v1','tclmachine.execution-plan.v2','tclmachine.execution-plan.v3'):
+    has_returns = schema == output_schema
+    metadata_only = is_metadata_only(plan)
+    if schema not in ('tclmachine.execution-plan.v1','tclmachine.execution-plan.v2',
+                      'tclmachine.execution-plan.v3',output_schema):
         fail('Unsupported execution plan schema')
     if schema=='tclmachine.execution-plan.v1' and 'frozen_buffer_guards' in plan:
         fail('Frozen buffer guards require execution plan schema v2')
@@ -181,16 +195,24 @@ def validate_execution_plan(plan, *, archived=False):
     compatibility=plan.get('compatibility',{})
     if not isinstance(compatibility,dict):fail('SDK compatibility must be a mapping')
     packages=compatibility.get('packages',compatibility)
-    if not isinstance(packages,dict) or any(not identifier(packages.get(p)) for p in ('torch','furiosa-torch','furiosa-tcc')):
+    if (not isinstance(packages,dict) or not metadata_only
+            and any(not identifier(packages.get(p)) for p in ('torch','furiosa-torch','furiosa-tcc'))):
         fail('Exact SDK package versions are required')
     if not isinstance(plan.get('compiler_identity'),dict) or any(not identifier(plan['compiler_identity'].get(k)) for k in ('version','revision')):
         fail('Compiler version/revision is required')
     tensors,kernels,entries=(plan.get(k) for k in ('tensors','kernels','entries'))
-    if any(not isinstance(v,dict) or not v for v in (tensors,kernels,entries)):fail('Plan needs tensors, kernels and entries')
+    if (any(not isinstance(v,dict) for v in (tensors,kernels,entries)) or not entries
+            or not metadata_only and (not tensors or not kernels)):
+        fail('Plan needs tensors, kernels and entries')
     for name,value in tensors.items():
         if not identifier(name):fail('Invalid tensor identifier')
         spec(value);kind=value.get('kind')
         if kind not in ('user_input','parameter','buffer','state','intermediate'):fail('Unsupported tensor kind')
+        if metadata_only and kind != 'user_input':fail('Metadata-only plans may reference request inputs only')
+        if 'packed_int64_input' in value and (not has_returns or kind!='user_input'
+                or value['packed_int64_input'] is not True or not is_int64_word_layout(value)
+                or 'index_input_dtype' in value or 'value_range' in value):
+            fail('Packed int64 inputs require a dense two-word user tensor in schema v4')
         if kind in ('parameter','buffer') and not identifier(value.get('target')):fail('External state_dict target is required')
         if 'checkpoint_slice' in value:
             bounds=value['checkpoint_slice']
@@ -209,7 +231,7 @@ def validate_execution_plan(plan, *, archived=False):
                     or not -(2**31)<=bounds['min']<bounds['max_exclusive']<=2**31):
                 fail('value_range requires external int32 tensor and exact signed-i32 min/max_exclusive bounds')
         if 'index_input_dtype' in value and (
-                schema != 'tclmachine.execution-plan.v3' or kind != 'user_input'
+                schema not in ('tclmachine.execution-plan.v3',output_schema) or kind != 'user_input'
                 or value['index_input_dtype'] != 'int64' or 'value_range' not in value):
             fail('Checked int64 indices require schema v3 and a range-guarded int32 user input')
         if kind=='state' and value.get('initial')!='zeros':fail('Only explicit zero-initialized state is supported')
@@ -261,7 +283,7 @@ def validate_execution_plan(plan, *, archived=False):
         if any(tensors[x]['kind']!='user_input' for x in inputs):fail('Entry inputs must be user_input tensors')
         available=set(inputs)|{n for n,s in tensors.items() if s['kind'] in ('parameter','buffer','state')}
         produced=set();steps=entry.get('steps')
-        if not isinstance(steps,list) or not steps:fail('Entry needs ordered kernel steps')
+        if not isinstance(steps,list) or not steps and not metadata_only:fail('Entry needs ordered kernel steps')
         for step in steps:
             if not isinstance(step,dict) or not identifier(step.get('kernel')) or step['kernel'] not in kernels:fail('Unknown step kernel')
             key=step['kernel'];used.add(key);kernel=kernels[key]
@@ -273,10 +295,18 @@ def validate_execution_plan(plan, *, archived=False):
             if key in signature and signature[key]!=logical:fail('Kernel reused with different logical tensor contracts')
             signature[key]=logical;available.update(out);produced.update(out)
         outputs=refs(entry.get('outputs'),'Entry outputs',True)
-        if not outputs or any(x not in available for x in outputs):fail('Entry outputs must be available tensors')
-        if any('index_input_dtype' in tensors[x] for x in outputs):fail('Checked index input cannot be an entry output')
+        if (not outputs and not has_returns or any(x not in available for x in outputs)):
+            fail('Entry outputs must be available tensors')
+        if any('index_input_dtype' in tensors[x] or 'packed_int64_input' in tensors[x] for x in outputs):
+            fail('Narrowed or packed input cannot be an entry output')
+        if has_returns:
+            validate_returns(entry, outputs, tensors, fail)
+        elif 'return_values' in entry:
+            fail('Return descriptors require execution plan schema v4')
         updates=entry.get('state_updates')
         if not isinstance(updates,dict):fail('Entry needs explicit state_updates mapping')
+        if has_returns and (updates or any(tensors[x]['kind']=='state' for x in outputs)):
+            fail('Return descriptors require a stateless entry')
         for target,value in updates.items():
             if target not in tensors or tensors[target]['kind']!='state' or not isinstance(value,str) or value not in produced:
                 fail('State update must bind a state slot to a produced tensor')
@@ -366,6 +396,13 @@ class ExecutionFXB:
     supports_zero_input_kernels=True
     supports_frozen_buffer_guards=True
     supports_checked_int64_indices=True
+    supports_output_boundaries=True
+    supports_output_writeback=True
+    supports_compact_index_outputs=True
+    supports_zeroed_output_returns=True
+    supports_complex_views=True
+    supports_packed_int64_words=True
+    supports_index64_views=True
     def __init__(self,path,*,weights=None,device='furiosa:0',max_request_states=1,load_buffers=2,load_buffer_bytes=256*1024**2):
         if device!='furiosa:0':raise ExecutionPlanError('Only furiosa:0 is qualified')
         if type(max_request_states)!=int or max_request_states<1:raise ExecutionPlanError('max_request_states must be a positive integer')
@@ -373,6 +410,8 @@ class ExecutionFXB:
         if type(load_buffer_bytes) is not int or load_buffer_bytes<1:raise ExecutionPlanError('load_buffer_bytes must be positive')
         from .checkpoint import SafeTensorWeights
         self.path=Path(path);self.plan=read_execution_plan(path)
+        from .output_boundaries import is_metadata_only
+        self.metadata_only=is_metadata_only(self.plan)
         if weights is None and isinstance(self.plan['source_metadata'].get('checkpoint'),dict):
             # Like furiosa-llm .fxb: the package names the original HF checkpoint and holds no weight copy.
             from .hub import original_checkpoint
@@ -419,6 +458,10 @@ class ExecutionFXB:
                 raise
             return self
     def _load(self):
+        if self.metadata_only:
+            import torch
+            self.torch=torch
+            return
         import torch,furiosa.torch as sdk
         from furiosa.torch.config import set_cpu_fallback,get_cpu_fallback
         packages=self.plan['compatibility'];packages=packages.get('packages',packages)
@@ -708,6 +751,8 @@ class ExecutionFXB:
         return result
     def new_state(self):
         with self._lock:
+            if self.metadata_only:
+                raise ExecutionPlanError('Metadata-only packages have no NPU request state')
             self._healthy()
             if not self._state_bytes:raise ExecutionPlanError('Plan has no state slots')
             if len(self._requests)>=self.max_request_states:raise ExecutionPlanError('Request state limit reached; release an existing request')
@@ -726,13 +771,15 @@ class ExecutionFXB:
         with self._lock:
             self._healthy()
             if state is not None:self._check_state(state)
+            if self.metadata_only:return
             self._admit_requests(len(self._requests),default_present=self._default_ready or state is None)
             try:
                 if state is None:self._reset()
                 else:state._tensors=self._allocate_states()
             except BaseException:self.failed=True;raise
     def _healthy(self):
-        if self.stack is None or not self.programs or self.failed:raise ExecutionPlanError('Session must be loaded and healthy')
+        if self.stack is None or (not self.programs and not self.metadata_only) or self.failed:
+            raise ExecutionPlanError('Session must be loaded and healthy')
     def predict(self,inputs=(),*,output_device='cpu',state=None):
         return self.run('forward',inputs,output_device=output_device,state=state)
     def run(self,entry,inputs=(),*,output_device='cpu',state=None):
@@ -744,6 +791,12 @@ class ExecutionFXB:
             if state is not None:self._check_state(state)
             self.memory=self._admit_requests(len(self._requests),output_device,default_present=self._default_ready or state is None)
             recipe=self.plan['entries'][entry]
+            return_values=recipe.get('return_values')
+            writeback=next((r for r in return_values or () if r['kind']=='writeback'),None)
+            if (output_device!='cpu'
+                    and any(r['kind'] in ('index64','index64_view','writeback','compact_indices','complex_view','packed_int64')
+                            for r in return_values or ())):
+                raise ExecutionPlanError('Converted tensor and writeback outputs require CPU return')
             if isinstance(inputs,dict):
                 if set(inputs)!=set(recipe['inputs']):raise ExecutionPlanError('Entry input names differ')
                 values=inputs
@@ -751,6 +804,21 @@ class ExecutionFXB:
             else:raise ExecutionPlanError('Entry input arity mismatch')
             values={name:_entry_input(value,self.plan['tensors'][name],self.torch,name)
                     for name,value in values.items()}
+            from .output_boundaries import assemble_returns
+            if writeback is not None:
+                name=writeback['target'];target=values[name]
+                if target.device.type!='cpu' or target.requires_grad or not target.is_contiguous():
+                    raise ExecutionPlanError('Writeback requires a contiguous CPU buffer without gradients')
+                storage=target.untyped_storage().data_ptr()
+                for other,value in values.items():
+                    if (other!=name and value.device.type=='cpu' and value.numel()
+                            and value.untyped_storage().data_ptr()==storage and value is not target):
+                        raise ExecutionPlanError('Writeback refuses overlapping storage in distinct inputs')
+            if self.metadata_only:
+                if output_device!='cpu':
+                    raise ExecutionPlanError('Metadata-only packages currently return CPU values')
+                bases={name:values[name].cpu() for name in recipe['outputs']}
+                return assemble_returns(return_values,bases,self.torch,'cpu')
             if state is not None:state._borrowed=True
             try:
                 with self.torch.no_grad():
@@ -797,7 +865,15 @@ class ExecutionFXB:
                     output=tuple(tensors[n].cpu() if output_device=='cpu' else
                                  tensors[n].clone() if n in persistent_outputs else tensors[n]
                                  for n in recipe['outputs'])
-                    self._sync()
+                    if writeback is not None:self._sync()
+                    if return_values is not None:
+                        bases=dict(zip(recipe['outputs'],output))
+                        if output_device=='cpu':
+                            bases.update({n:values[n] for n in bases.keys() & values.keys()
+                                          if values[n].device.type=='cpu'})
+                        output=assemble_returns(return_values,bases,self.torch,
+                                                'cpu' if output_device=='cpu' else self.device,inputs=values)
+                    if writeback is None:self._sync()
                     committed={**active,**{slot:tensors[value] for slot,value in recipe['state_updates'].items()}}
                     if state is None:self.states=committed
                     else:state._tensors=committed
